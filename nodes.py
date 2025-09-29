@@ -1,8 +1,13 @@
 import subprocess
-from utils import call_vlm_api, call_codegen_api, call_vllm_comparison_api
+from openai import OpenAI
+
+from utils import call_vlm_api, call_codegen_api, call_vllm_comparison_api#
+from constants import *
 
 # This file contains the functions that will be the nodes in our graph.
 # Each class has a `run` method that takes the current state and returns an updated state.
+
+# TODO: move all prompts to constants file
 
 class VlmBrain:
     def run(self, state):
@@ -91,6 +96,20 @@ class CodeExecutor:
 class VlmComparer:
     def run(self, state):
         print("--- Comparing Images (vLLM Critic) ---")
+
+        # --- Instantiate vLLM Client ---
+        # For inference
+        try:
+            vllm_client = OpenAI(
+                base_url="http://localhost:8000/v1",
+                api_key="vllm"  # API key is not used but required by the library
+            )
+            MODEL_NAME = "Qwen/Qwen2.5-VL-7B"
+            print("Successfully connected to vLLM server.")
+        except Exception as e:
+            print(f"Could not connect to vLLM server at http://localhost:8000. Please ensure it is running. Error: {e}")
+            vllm_client = None
+
         prompt = f"""You are an AI critic. Your task is to determine if the 'Generated Image' successfully fulfills the original user request when compared to the 'Original Image'.
         
         User Request: "{state['prompt']}"
@@ -101,6 +120,7 @@ class VlmComparer:
         """
         
         feedback = call_vllm_comparison_api(
+            vllm_client,
             prompt=prompt,
             original_image_path=state["original_image_path"],
             generated_image_path=state["generated_image_path"]

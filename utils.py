@@ -1,5 +1,8 @@
 import base64
 import requests
+import os
+
+from constants import *
 
 # This file contains mock functions for making API calls.
 # Replace these with your actual model inference logic.
@@ -8,6 +11,9 @@ import requests
 
 def image_to_base64_str(filepath):
     """Converts an image file to a base64 string."""
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Image file not found at {filepath}")
+
     with open(filepath, "rb") as f:
         return base64.b64encode(f.read()).decode('utf-8')
 
@@ -72,15 +78,51 @@ except Exception as e:
     print(f"An error occurred: {e}")
 """
 
-def call_vllm_comparison_api(prompt: str, original_image_path: str, generated_image_path: str):
+def call_vllm_comparison_api(vllm_client, prompt: str, original_image_path: str, generated_image_path: str):
     """
-    Placeholder for a call to your vLLM inference server.
-    This function would send the prompt and both images to the model.
+    Calls the local vLLM server with two images and a prompt to get a comparison.
     """
-    print(f"  [Mock vLLM Critic Call] Comparing {original_image_path} and {generated_image_path}...")
-    
-    # MOCK RESPONSE LOGIC
-    # In a real scenario, this would be the text output from your vLLM model.
-    # To test the looping logic, you can change this return value.
-    return "success" 
-    # return "The monocle is drawn in the wrong place."
+    if not vllm_client:
+        return "Error: vLLM client not initialized. Cannot perform comparison."
+        
+    print(f"  [Real vLLM Critic Call] Comparing {original_image_path} and {generated_image_path}...")
+
+    try:
+        # Encode both images
+        base64_original = image_to_base64_str(original_image_path)
+        base64_generated = image_to_base64_str(generated_image_path)
+
+        # Send the request with the prompt and both images
+        response = vllm_client.chat.completions.create(
+            model=EVAL_MODEL_NAME,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Original Image:"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_original}"}
+                        },
+                        {"type": "text", "text": "Generated Image:"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_generated}"}
+                        },
+                        {"type": "text", "text": f"\n\n{prompt}"}
+                    ]
+                }
+            ],
+            max_tokens=100, # Feedback should be concise
+            temperature=0.2, # Low temperature for deterministic feedback
+        )
+        
+        feedback = response.choices[0].message.content.strip()
+        return feedback
+
+    except FileNotFoundError as e:
+        print(f"Error during VLM call: {e}")
+        return f"Error: Image file not found. {e}"
+    except Exception as e:
+        print(f"An error occurred during the VLM call: {e}")
+        return f"Error: Could not get a response from the vLLM server. {e}"
