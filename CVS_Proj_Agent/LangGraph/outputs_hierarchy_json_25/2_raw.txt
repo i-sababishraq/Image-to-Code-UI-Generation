@@ -1,0 +1,222 @@
+system
+You are a helpful assistant.
+user
+You are an expert UI layout analyzer. Analyze this wireframe and output all visible components in a hierarchical JSON structure.
+
+Each component should be represented as an object with:
+- 'type': the component name (e.g., header, nav, hero, button, image, card, footer)
+- 'attributes': a dictionary with attributes like color, position, size, alignment, and text content if visible
+- 'children': a list of nested components inside it
+
+The root node should represent the full page as 'page'.
+Follow the visual hierarchy (top to bottom, left to right). Output valid JSON only—no text outside the JSON.
+assistant
+```json
+{
+  "type": "page",
+  "attributes": {
+    "color": "white",
+    "position": "top",
+    "size": "full",
+    "alignment": "center"
+  },
+  "children": [
+    {
+      "type": "header",
+      "attributes": {
+        "color": "white",
+        "position": "top",
+        "size": "small",
+        "alignment": "center"
+      },
+      "children": [
+        {
+          "type": "nav",
+          "attributes": {
+            "color": "white",
+            "position": "top",
+            "size": "small",
+            "alignment": "center"
+          },
+          "children": [
+            {
+              "type": "button",
+              "attributes": {
+                "color": "blue",
+                "position": "top",
+                "size": "small",
+                "alignment": "center",
+                "text_content": "Home"
+              }
+            },
+            {
+              "type": "button",
+              "attributes": {
+                "color": "black",
+                "position": "top",
+                "size": "small",
+                "alignment": "center",
+                "text_content": "About Us"
+              }
+            },
+            {
+              "type": "button",
+              "attributes": {
+                "color": "black",
+                "position": "top",
+                "size": "small",
+                "alignment": "center",
+                "text_content": "Job Listings"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "hero",
+      "attributes": {
+        "color": "lightgray",
+        "position": "center",
+        "size": "large",
+        "alignment": "center"
+      },
+      "children": [
+        {
+          "type": "text",
+          "attributes": {
+            "color": "black",
+            "position": "center",
+            "size": "medium",
+            "alignment": "center",
+            "text_content": "Welcome"
+          }
+        },
+        {
+          "type": "text",
+          "attributes": {
+            "color": "black",
+            "position": "center",
+            "size": "small",
+            "alignment": "center",
+            "text_content": "Your next career step is just a few clicks away. Start your journey with us today."
+          }
+        },
+        {
+          "type": "button",
+          "attributes": {
+            "color": "green",
+            "position": "center",
+            "size": "small",
+            "alignment": "center",
+            "text_content": "Search Jobs"
+          }
+        }
+      ]
+    },
+    {
+      "type": "card",
+      "attributes": {
+        "color": "lightgray",
+        "position": "center",
+        "size": "medium",
+        "alignment": "center"
+      },
+      "children": [
+        {
+          "type": "text",
+          "attributes": {
+            "color": "black",
+            "position": "center",
+            "size": "medium",
+            "alignment": "center",
+            "text_content": "About Us"
+          }
+        },
+        {
+          "type": "text",
+          "attributes": {
+            "color": "black",
+            "position": "center",
+            "size": "small",
+            "alignment": "center",
+            "text_content": "We are a leading recruitment portal specializing in connecting employers and job seekers."
+          }
+        },
+        {
+          "type": "button",
+          "attributes": {
+            "color": "red",
+            "position": "center",
+            "size": "small",
+            "alignment": "center",
+            "text_content": "Learn More"
+          }
+        }
+      ]
+    },
+    {
+      "type": "card",
+      "attributes": {
+        "color": "lightgray",
+        "position": "center",
+        "size": "medium",
+        "alignment": "center"
+      },
+      "children": [
+        {
+          "type": "text",
+          "attributes": {
+            "color": "black",
+            "position": "center",
+            "size": "medium",
+            "alignment": "center",
+            "text_content": "Contact Us"
+          }
+        },
+        {
+          "type": "text",
+          "attributes": {
+            "color": "black",
+            "position": "center",
+            "size": "small",
+            "alignment": "center",
+            "text_content": "For any inquiries or support, feel free to reach out to us."
+          }
+        },
+        {
+          "type": "button",
+          "attributes": {
+            "color": "orange",
+            "position": "center",
+            "size": "small",
+            "alignment": "center",
+            "text_content": "Contact Us"
+          }
+        }
+      ]
+    },
+    {
+      "type": "footer",
+      "attributes": {
+        "color": "white",
+        "position": "bottom",
+        "size": "small",
+        "alignment": "center"
+      },
+      "children": [
+        {
+          "type": "text",
+          "attributes": {
+            "color": "black",
+            "position": "center",
+            "size": "small",
+            "alignment": "center",
+            "text_content": "© Recruitment Portal 2022"
+          }
+        }
+      ]
+    }
+  ]
+}
+```

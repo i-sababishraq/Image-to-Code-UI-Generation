@@ -1,7 +1,9 @@
 # exclude dataset
 /Web2Code
 Web2Code/*
+Web2Code*
 /extracted_images
 /extracted_images/*
 /extracted_images_eval
 /extracted_images_eval/*
+*.zip
