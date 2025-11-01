@@ -1,4 +1,0 @@
-image,status,raw_output_path,json_path
-1.png,parsed_from_block,/home/ashmal/Courses/CVS/Project/LangGraph/outputs_hierarchy_json_25/1_raw.txt,/home/ashmal/Courses/CVS/Project/LangGraph/outputs_hierarchy_json_25/1_hierarchy.json
-2.png,parsed_from_block,/home/ashmal/Courses/CVS/Project/LangGraph/outputs_hierarchy_json_25/2_raw.txt,/home/ashmal/Courses/CVS/Project/LangGraph/outputs_hierarchy_json_25/2_hierarchy.json
-3.png,parsed_from_block,/home/ashmal/Courses/CVS/Project/LangGraph/outputs_hierarchy_json_25/3_raw.txt,/home/ashmal/Courses/CVS/Project/LangGraph/outputs_hierarchy_json_25/3_hierarchy.json
