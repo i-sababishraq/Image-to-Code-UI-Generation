@@ -407,6 +407,7 @@ def extract_html(text: str) -> str:
     i = text.lower().find("<html")
     return text[i:].strip() if i != -1 else text.strip()
 
+'''
 def _patch_html(html: str, asset_paths: Dict[str, str], messages: List[str]) -> Tuple[str, List[str]]:
     if not asset_paths:
         messages.append("Patching: No assets to patch.")
@@ -438,6 +439,7 @@ def _patch_html(html: str, asset_paths: Dict[str, str], messages: List[str]) -> 
                 messages.append(f"Patched CSS background-image for {component_id} -> {new_path}")
 
     return html, messages
+'''
 
 RELDESC_SYSTEM = "You are a meticulous UI analyst who describes layouts as a single dense paragraph of relative relationships."
 RELDESC_PROMPT = """
@@ -896,9 +898,9 @@ def node_refine_loop(state: CodeRefineState) -> CodeRefineState:
         max_tokens=state.code_tokens
     )
 
-    if state.asset_paths:
-        state.messages.append(f"Re-patching assets for iteration {state.current_iteration}...")
-        state.html, state.messages = _patch_html(state.html, state.asset_paths, state.messages)
+    #if state.asset_paths:
+    #    state.messages.append(f"Re-patching assets for iteration {state.current_iteration}...")
+    #    state.html, state.messages = _patch_html(state.html, state.asset_paths, state.messages)
 
     versioned_path = pathlib.Path(state.out_html).with_name(pathlib.Path(state.out_html).stem + f"_v{state.current_iteration}" + pathlib.Path(state.out_html).suffix)
     with open(versioned_path, "w", encoding="utf-8") as f: f.write(state.html)
@@ -1342,7 +1344,7 @@ def main():
     )
 
     initial_state_vlm = {"messages": [{"role": "user", "content": cli_args_vlm.prompt}], "cli_args": cli_args_vlm}
-    '''
+
     if not pathlib.Path(cli_args_vlm.image).exists():
         print(f"--- WARNING: Skipping Test 1 ---")
         print(f"Test image not found at: {cli_args_vlm.image}")
@@ -1359,7 +1361,7 @@ def main():
 
     initial_state_edit = {"messages": [{"role": "user", "content": cli_args_edit.prompt}], "cli_args": cli_args_edit}
     run_test("Test 2: Code Editor Pipeline (gpt-4.1-mini)", initial_state_edit)
-    '''
+
     initial_state_asset = {"messages": [{"role": "user", "content": cli_args_asset.prompt}], "cli_args": cli_args_asset}
     run_test("Test 3: Asset Search Pipeline", initial_state_asset)
 
