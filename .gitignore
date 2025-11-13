@@ -10,3 +10,7 @@ Web2Code*
 CVS_Proj_Agent/Images/*
 CVS_Proj_Agent/Outputs/*
 CVS_Proj_Agent/Outputs/.*
+.env
+Outputs/*
+Images/*
+.*

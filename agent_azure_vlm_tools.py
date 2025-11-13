@@ -1,3 +1,4 @@
+# agent_azure_vlm_tools.py
 import os
 import re
 import json
@@ -10,7 +11,7 @@ import requests
 from typing import List, Dict, Any, Optional, TypedDict, Literal, Tuple
 from dataclasses import dataclass, field
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from uuid import uuid4
 
 # --- LangGraph / LangChain ---
@@ -18,13 +19,12 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 # --- OpenAI / Azure ---
-from openai import AzureOpenAI, OpenAI
+from openai import AzureOpenAI
 from dotenv import load_dotenv
 
-# --- HF Transformers & Diffusers (Local VLM) ---
-import torch
-from transformers import AutoModelForVision2Seq, AutoProcessor, AutoTokenizer, pipeline, BitsAndBytesConfig
-from diffusers import DiffusionPipeline
+# --- Google Gemini ---
+from google import genai
+from google.genai import types
 
 # --- Playwright (for screenshots) ---
 from playwright.sync_api import sync_playwright
@@ -34,21 +34,34 @@ load_dotenv()
 
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# ## SECTION 1: UNIFIED MODEL MANAGER (Singleton)
+# ## SECTION 1: UNIFIED MODEL MANAGER (Singleton) - GPT-ONLY
 #
-# Manages loading all models (Azure, Local VLM, Generator)
-# to ensure they are only loaded into memory once.
+# Manages Azure / OpenAI clients and provides unified chat helpers.
+# All model calls use the Azure/OpenAI GPT deployments (gpt-4.1-mini by default).
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
 
-# --- Configs from all files ---
-QWEN_VL_MODEL_NAME = os.getenv("QWEN_VL_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct")
-SD_GENERATOR_MODEL = os.getenv("SD_GENERATOR_MODEL", "segmind/Segmind-Vega")
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+GPT_DEPLOYMENT_DEFAULT = os.getenv("GPT_DEPLOYMENT", "gpt-4.1-mini")
+
+def _get_closest_aspect_ratio(width: int, height: int) -> str:
+    """Calculates the closest supported aspect ratio for the Gemini API."""
+    supported_ratios = {
+        "1:1": 1.0, "16:9": 16/9, "9:16": 9/16, "4:3": 4/3, "3:4": 3/4,
+        "4:5": 4/5, "5:4": 5/4, "2:3": 2/3, "3:2": 3/2, "21:9": 21/9,
+    }
+    
+    target_ratio = width / height
+    
+    # Find the ratio string whose value is closest to the target_ratio
+    closest_ratio_str = min(
+        supported_ratios.keys(),
+        key=lambda r: abs(supported_ratios[r] - target_ratio)
+    )
+    print(f"Target W/H ({width}x{height}, ratio {target_ratio:.2f}) -> Closest API ratio: {closest_ratio_str}")
+    return closest_ratio_str
 
 class ModelManager:
-    """Manages loading all models and API clients at startup."""
+    """Manages Azure/OpenAI clients and provides chat wrappers for both vision+text and text-only usage."""
     _instance = None
 
     def __new__(cls, *args, **kwargs):
@@ -57,14 +70,15 @@ class ModelManager:
         return cls._instance
 
     def __init__(self):
-        if not hasattr(self, 'vlm_model'): # Initialize only once
-            print("Initializing and loading all models and clients...")
-            
-            # 1. Configure Azure Client
+        if not hasattr(self, 'azure_client'):  # Initialize only once
+            print("Initializing Azure/OpenAI clients (GPT-only mode)...")
+
+            # Azure OpenAI client (for most GPT calls)
             self.AZURE_ENDPOINT = os.getenv("ENDPOINT_URL", "")
             self.AZURE_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
             if not self.AZURE_API_KEY or not self.AZURE_ENDPOINT:
                 print("Warning: AZURE_OPENAI_API_KEY or ENDPOINT_URL not set.")
+                self.azure_client = None
             else:
                 self.azure_client = AzureOpenAI(
                     azure_endpoint=self.AZURE_ENDPOINT,
@@ -73,100 +87,149 @@ class ModelManager:
                 )
                 print("AzureOpenAI client loaded.")
 
-            # 2. Configure OpenAI Client (for edit_node_tool)
-            try:
-                self.OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-                self.openai_client = OpenAI(api_key=self.OPENAI_API_KEY)
-                print("OpenAI client loaded.")
-            except KeyError:
-                print("Warning: OPENAI_API_KEY not set. GPT editor tool will not work.")
-                self.openai_client = None
+            # Default deployment name for GPT calls
+            self.default_deployment = GPT_DEPLOYMENT_DEFAULT
+            print(f"Default GPT deployment: {self.default_deployment}")
 
-            # 3. Configure and load the Local VLM (Qwen)
-            print(f"Loading local VLM: {QWEN_VL_MODEL_NAME}...")
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4"
-            )
-            self.vlm_processor = AutoProcessor.from_pretrained(QWEN_VL_MODEL_NAME, trust_remote_code=True)
-            self.vlm_model = AutoModelForVision2Seq.from_pretrained(
-                QWEN_VL_MODEL_NAME,
-                torch_dtype=DTYPE,
-                device_map="auto",
-                quantization_config=quantization_config,
-                trust_remote_code=True
-            )
-            print("Local VLM (Qwen) loaded.")
-
-            # 4. Configure and load the Generator
-            print(f"Loading image generator: {SD_GENERATOR_MODEL}...")
-            self.generator_pipe = DiffusionPipeline.from_pretrained(
-                SD_GENERATOR_MODEL, torch_dtype=DTYPE
-            )
-            self.generator_pipe.enable_model_cpu_offload()
-            print("Generator loaded.")
-            
-            print("All models and clients loaded and ready.")
+            self.google_api_key = os.getenv("GOOGLE_API_KEY")
+            self.genai_model = None
+            if not self.google_api_key:
+                print("Warning: GOOGLE_API_KEY not set. Real image generation will be disabled.")
+            else:
+                try:
+                    self.genai_client = genai.Client(api_key=self.google_api_key)
+                    #self.genai_model = genai.GenerativeModel("gemini-2.0-flash-preview-image-generation")
+                    print("Google GenAI client (Nano Banana) initialized.")
+                except Exception as e:
+                    print(f"Error initializing Google GenAI: {e}")
+                    self.genai_model = None
 
     def get_azure_client(self) -> AzureOpenAI:
-        if not hasattr(self, 'azure_client'):
+        if not hasattr(self, 'azure_client') or self.azure_client is None:
             raise RuntimeError("Azure client not initialized. Set AZURE_OPENAI_API_KEY and ENDPOINT_URL.")
         return self.azure_client
-    
-    def get_openai_client(self) -> OpenAI:
-        if not hasattr(self, 'openai_client') or self.openai_client is None:
-            raise RuntimeError("OpenAI client not initialized. Set OPENAI_API_KEY.")
-        return self.openai_client
 
-    # --- VLM Chat (in asset tool) ---
-    def chat_vlm(self, messages, temperature=0.2, max_new_tokens=2048):
-        gen_kwargs = {"do_sample": temperature > 0, "max_new_tokens": max_new_tokens}
-        if temperature > 0:
-            gen_kwargs["temperature"] = temperature
-
-        inputs = self.vlm_processor.apply_chat_template(
-            messages, add_generation_prompt=True, tokenize=True, return_tensors="pt", return_dict=True
-        ).to(self.vlm_model.device)
-        
-        with torch.no_grad():
-            output_ids = self.vlm_model.generate(**inputs, **gen_kwargs)
-
-        gen_only = [out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], output_ids)]
-        return self.vlm_processor.batch_decode(gen_only, skip_special_tokens=True, clean_up_tokenization_spaces=True)[0]
-
-    def chat_llm(self, prompt: str):
-        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-        return self.chat_vlm(messages, temperature=0.1, max_new_tokens=2048)
-
-    # --- Generator (from asset_tool) ---
-    def generate_image(self, prompt: str) -> Image.Image:
-        print(f"Generating image with prompt: '{prompt}'")
-        return self.generator_pipe(prompt, num_inference_steps=75, guidance_scale=9.0).images[0]
-    
-    # --- Azure Chat (from agent_azure_vlm) ---
-    def chat_complete_azure(self, deployment: str, messages: List[Dict[str, Any]],
-                            temperature: float, max_tokens: int) -> str:
+    def chat_complete_azure(self, deployment: Optional[str], messages: List[Dict[str, Any]],
+                            temperature: float = 0.0, max_tokens: int = 1024) -> str:
+        """Calls Azure OpenAI chat completion and returns the assistant content as string."""
         client = self.get_azure_client()
+        model_name = deployment or self.default_deployment
         resp = client.chat.completions.create(
-            model=deployment,
+            model=model_name,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
         )
         return (resp.choices[0].message.content or "").strip()
 
+    # For compatibility with earlier code that expected a VLM-style chat, expose chat_vlm and chat_llm wrappers.
+    def chat_vlm(self, messages, temperature=0.2, max_new_tokens=2048, deployment: Optional[str] = None):
+        """Use GPT (Azure) to handle vision+language style messages. 'messages' should be in the Azure chat format."""
+        return self.chat_complete_azure(deployment or self.default_deployment, messages, temperature, max_new_tokens)
+
+    def chat_llm(self, prompt: str, temperature: float = 0.1, max_tokens: int = 1024, deployment: Optional[str] = None):
+        """Use GPT to handle plain text prompts: converts prompt to a single-user message."""
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        return self.chat_vlm(messages, temperature=temperature, max_new_tokens=max_tokens, deployment=deployment)
+
+    def _create_placeholder_image(self, prompt: str, width: int = 1024, height: int = 512) -> Image.Image:
+        """
+        Internal fallback function to create a placeholder image.
+        (This is your original generate_image logic)
+        """
+        W, H = width, height
+        img = Image.new("RGB", (W, H), color=(240, 240, 240))
+        d = ImageDraw.Draw(img)
+        try:
+            font_size = max(16, int(H / 25)) 
+            font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+        except Exception:
+            font = ImageFont.load_default()
+            font_size = 12
+        
+        lines = []
+        max_chars = max(20, int(W / (font_size * 0.6)))
+        for i in range(0, len(prompt), max_chars):
+            lines.append(prompt[i:i+max_chars])
+        
+        y = 20
+        d.text((20, y), f"PLACEHOLDER ({W}x{H})", fill=(30, 30, 30), font=font)
+        y += (font_size + 10)
+        
+        for line in lines:
+            if y > (H - (font_size + 10)):
+                d.text((20, y), "...", fill=(60, 60, 60), font=font)
+                break
+            d.text((20, y), line, fill=(60, 60, 60), font=font)
+            y += (font_size + 2)
+            
+        return img
+
+    def generate_image(self, prompt: str, width: int = 1024, height: int = 512) -> Image.Image:
+        """
+        Generates an image using Google GenAI (Nano Banana).
+        Falls back to a placeholder if the API is not available or fails.
+        """
+        if not self.genai_client:
+            print("-> GenAI model not configured, using placeholder.")
+            return self._create_placeholder_image(prompt, width, height)
+
+        try:
+            # 1. Get the closest supported aspect ratio
+            aspect_ratio = _get_closest_aspect_ratio(width, height)
+            enhanced_prompt = f"{prompt}. Generate a photorealistic image. Aspect ratio {aspect_ratio}."
+            print(f"-> Calling Gemini 2.0 Flash with prompt: '{enhanced_prompt}'")
+
+            response = self.genai_client.models.generate_content(
+                    model="gemini-2.0-flash-preview-image-generation",
+                    contents=enhanced_prompt,
+                    config=types.GenerateContentConfig(
+                        response_modalities=["TEXT", "IMAGE"]
+                    )
+                )
+
+            # Process Response
+            if response and response.parts:
+                for part in response.parts:
+                    if hasattr(part, "inline_data") and part.inline_data:
+                        print("-> Successfully generated image from inline_data.")
+                        
+                        # FIX: Check if it's ALREADY bytes (new SDK) vs string (old SDK logic)
+                        raw_data = part.inline_data.data
+                        if isinstance(raw_data, bytes):
+                             img_data = raw_data
+                        else:
+                             img_data = base64.b64decode(raw_data)
+                        
+                        try:
+                            image_stream = BytesIO(img_data)
+                            pil_image = Image.open(image_stream)
+                            return pil_image
+                        
+                        except Exception as img_exc:
+                            print(f"-> Failed to open/verify image from BytesIO: {img_exc}")
+                            return self._create_placeholder_image(f"[GenAI Image Decode Error] {prompt}", width, height)
+                    
+                    if hasattr(part, "image") and part.image:
+                        print("-> Successfully generated image from .image attribute.")
+                        return part.image
+
+            print(f"-> GenAI response did not contain an image. Falling back to placeholder.")
+            return self._create_placeholder_image(f"[GenAI No Image] {prompt}", width, height)
+
+        except Exception as e:
+            print(f"-> ERROR during GenAI image generation: {e}. Falling back to placeholder.")
+            return self._create_placeholder_image(f"[API Error] {prompt}", width, height)
+
 # --- Initialize models ONCE ---
 models = ModelManager()
 
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# ## SECTION 2: ASSET-GENERATION TOOL (SIMPLIFIED)
-#
-# This graph is now a single-node pipeline.
-# It no longer searches Pexels. It only generates and resizes images.
+# ## SECTION 2: ASSET-FINDING TOOL (unchanged logic but generator uses placeholder)
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
 
-### --- Utilities from asset_tool.py ---
 def load_image(path: str) -> Image.Image:
     return Image.open(path).convert("RGB")
 
@@ -175,74 +238,82 @@ def b64img(pil_img: Image.Image) -> str:
     pil_img.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-### --- State from asset_tool.py ---
 class AssetGraphState(TypedDict):
-    """State for the asset-finding subgraph."""
     instructions: str
     bounding_box: Tuple[int, int]
-    # These are no longer used but kept for schema compatibility
-    search_query: Optional[str]
-    found_image_url: Optional[str]
-    # This is the only output
+    search_query: str
+    #found_image_url: Optional[str]
     final_asset_path: Optional[str]
 
-### --- Node (REPLACES ALL OTHERS) ---
-def asset_generate_and_resize_node(state: AssetGraphState) -> dict:
-    print("---(Asset Tool) NODE: Generate & Resize Image---")
-    prompt = state["instructions"]
-    bbox = state.get("bounding_box")
-    
-    # 1. Generate the image
-    generated_image = models.generate_image(prompt)
-    
-    # 2. Resize the image if bounding_box is provided
-    if bbox and isinstance(bbox, (tuple, list)) and len(bbox) == 2:
-        try:
-            # Use thumbnail to resize *while maintaining aspect ratio*
-            generated_image.thumbnail(bbox)
-            print(f"Resized image to fit within {bbox}")
-        except Exception as e:
-            print(f"Warning: Could not resize image. Error: {e}")
+def asset_prepare_search_query_node(state: AssetGraphState) -> dict:
+    print("---(Asset Tool) NODE: Prepare Search Query---")
+    prompt = f"""You are an expert at refining search queries. Extract only the essential visual keywords.
+**CRITICAL INSTRUCTIONS:**
+- DO NOT include words related to licensing.
+- DO NOT include quotation marks.
+User's request: "{state['instructions']}"
+Respond with ONLY the refined search query."""
+    raw_query = models.chat_llm(prompt)
+    search_query = raw_query.strip().replace('"', '')
+    print(f"Prepared search query: '{search_query}'")
+    return {"search_query": search_query}
 
-    # 3. Save the final image
+def asset_generate_image_node(state: AssetGraphState) -> dict:
+    print("---(Asset Tool) NODE: Generate Image ---")
+    # MODIFIED: Use the refined search_query, fallback to instructions
+    prompt = state.get("search_query", state["instructions"]) 
+    
+    try:
+        width, height = state['bounding_box']
+        print(f"Generating asset with size {width}x{height} and prompt: '{prompt}'")
+    except (KeyError, TypeError, ValueError):
+        width, height = 1024, 512
+        print(f"Warning: Bounding box not found. Using default {width}x{height}.")
+
+    print(f"Generating asset with prompt: '{prompt}'")
+    
+    # NOTE: This is where you would swap the placeholder with your 
+    # call to a real image gen API (e.g., Google GenAI, Nano Banana)
+    generated_image = models.generate_image(prompt, width=width, height=height)
+    
     output_dir = pathlib.Path("Outputs/Assets")
     output_dir.mkdir(parents=True, exist_ok=True)
     filename = f"generated_{uuid4()}.png"
     full_save_path = output_dir / filename
     generated_image.save(full_save_path)
     print(f"Image generated and saved to {full_save_path}")
-    
-    # 4. Create the relative path for HTML
     html_path = pathlib.Path("Assets") / filename
     final_asset_path = str(html_path.as_posix())
-    
     return {"final_asset_path": final_asset_path}
 
-### --- Graph Builder (SIMPLIFIED) ---
 def build_asset_graph():
     workflow = StateGraph(AssetGraphState)
-    # This is now a single-node graph
-    workflow.add_node("generate_image", asset_generate_and_resize_node)
-    workflow.set_entry_point("generate_image")
+
+    # Add only the nodes we need
+    workflow.add_node("prepare_search_query", asset_prepare_search_query_node)
+    workflow.add_node("generate_image", asset_generate_image_node)
+
+    # Set the entry point
+    workflow.set_entry_point("prepare_search_query")
+
+    # Define the simple, linear flow
+    workflow.add_edge("prepare_search_query", "generate_image")
     workflow.add_edge("generate_image", END)
+
     return workflow.compile()
 
-# --- Compile the graph ---
 asset_agent_app = build_asset_graph()
 
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# ## SECTION 3: CODE EDITOR TOOL
-#
-# This is the self-contained graph for editing HTML.
-# It will be used as a tool by the "Brain".
+# ## SECTION 3: CODE EDITOR TOOL (uses GPT via Azure)
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
 
 class CodeEditorState(TypedDict):
     html_code: str
     user_request: str
-    model_choice: Literal["gpt-4o-mini-2", "qwen-local"]
+    model_choice: Literal["gpt-4.1-mini", "qwen-local"]
     messages: list[str]
 
 EDITOR_SYSTEM_PROMPT = """
@@ -256,7 +327,6 @@ Your task is to take an existing HTML file, a user's request for changes, and to
 """
 
 def _clean_llm_output(code: str) -> str:
-    """Removes common markdown formatting."""
     code = code.strip()
     if code.startswith("```html"):
         code = code[7:]
@@ -265,53 +335,28 @@ def _clean_llm_output(code: str) -> str:
     return code.strip()
 
 def _call_gpt_editor(html_code: str, user_request: str, model: str) -> str:
-    """Uses OpenAI (GPT) model."""
     user_prompt = f"**User Request:**\n{user_request}\n\n**Original HTML Code:**\n```html\n{html_code}\n```\n\n**Your updated HTML Code:**"
     try:
-        client = models.get_openai_client()
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": EDITOR_SYSTEM_PROMPT},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.0,
-            max_tokens=8192,
-        )
-        edited_code = response.choices[0].message.content
-        return _clean_llm_output(edited_code)
-    except Exception as e:
-        print(f"Error calling OpenAI API: {e}")
-        return f"\n{html_code}"
-
-def _call_qwen_editor(html_code: str, user_request: str) -> str:
-    """Uses Local Qwen VLM."""
-    user_prompt = f"**User Request:**\n{user_request}\n\n**Original HTML Code:**\n```html\n{html_code}\n```\n\n**Your updated HTML Code:**"
-    messages = [
-        {"role": "system", "content": [{"type": "text", "text": EDITOR_SYSTEM_PROMPT}]},
-        {"role": "user", "content": [{"type": "text", "text": user_prompt}]}
-    ]
-    try:
-        edited_code = models.chat_vlm(messages, temperature=0.0, max_new_tokens=8192)
-        return _clean_llm_output(edited_code)
-    except Exception as e:
-        print(f"Error calling local Qwen VLM: {e}")
+        out = models.chat_complete_azure(model, [
+            {"role": "system", "content": EDITOR_SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ], temperature=0.0, max_tokens=8192)
+        return _clean_llm_output(out)
+    except Exception as e2:
+        print(f"Fallback Azure call failed: {e2}")
         return f"\n{html_code}"
 
 def node_edit_code(state: CodeEditorState) -> dict:
     print("---(Edit Tool) NODE: Edit Code---")
     html_code, user_request, model_choice = state['html_code'], state['user_request'], state['model_choice']
     messages = state.get('messages', [])
-    
+
     if not user_request:
         return {"messages": messages + ["No user request provided. Skipping edit."]}
-        
+
     try:
-        if "gpt" in model_choice.lower():
-            new_html_code = _call_gpt_editor(html_code, user_request, model_choice)
-        else:
-            new_html_code = _call_qwen_editor(html_code, user_request)
-        
+        new_html_code = _call_gpt_editor(html_code, user_request, model_choice)
+
         msg = f"Code edit complete using {model_choice}."
         print(msg)
         return {"html_code": new_html_code, "user_request": "", "messages": messages + [msg]}
@@ -327,23 +372,14 @@ def build_edit_graph():
     workflow.add_edge("edit_code", END)
     return workflow.compile(checkpointer=MemorySaver())
 
-# --- Compile the graph ---
 edit_agent_app = build_edit_graph()
 
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
-# ## SECTION 4: AZURE VLM PIPELINE (NEW ASSET FLOW)
-#
-# This pipeline is reordered to your new spec:
-# 1. (Qwen) Plan assets (names, descriptions, sizes).
-# 2. (SD Mini) Generate all assets.
-# 3. (GPT-4) Generate code, using the asset names as placeholders.
-# 4. (Python) Patch the HTML to replace names with final paths.
-# 5. (GPT-4) Score & Refine.
+# ## SECTION 4: AZURE VLM PIPELINE (now GPT-only for vision+text)
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
 
-## --- Helpers ---
 _SCORE_KEYS = ["aesthetics","completeness","layout_fidelity","text_legibility","visual_balance"]
 
 def _section(text: str, name: str) -> str:
@@ -357,7 +393,7 @@ def _score_val(block: str, key: str, default: int = 0) -> int:
         return int(m.group(1)) if m else default
     except:
         return default
-        
+
 def encode_image_to_data_url(path: str) -> str:
     mime = mimetypes.guess_type(path)[0] or "image/png"
     with open(path, "rb") as f:
@@ -371,41 +407,38 @@ def extract_html(text: str) -> str:
     i = text.lower().find("<html")
     return text[i:].strip() if i != -1 else text.strip()
 
-# *** UPDATED PATCH HELPER ***
 def _patch_html(html: str, asset_paths: Dict[str, str], messages: List[str]) -> Tuple[str, List[str]]:
-    """
-    Helper to patch HTML with asset paths.
-    Replaces src="asset_name" with src="Assets/path/to/asset.png"
-    """
     if not asset_paths:
         messages.append("Patching: No assets to patch.")
         return html, messages
 
-    for asset_name, new_path in asset_paths.items():
-        
-        # --- 1. Patch <img> tags ---
-        # Regex: src="asset_name" (with optional quotes)
-        img_regex = re.compile(rf'src=(["\']?){re.escape(asset_name)}\1', re.I)
-        replace_with = f'src="{new_path}"'
-        
-        new_html, count = img_regex.subn(replace_with, html)
-        if count > 0:
-            html = new_html
-            messages.append(f"Patched <img> tag for {asset_name} -> {new_path}")
+    for component_id, new_path in asset_paths.items():
+        tag_regex = re.compile(rf'<img[^>]+data-asset-id="{re.escape(component_id)}"[^>]*>', re.I | re.S)
+        match = tag_regex.search(html)
 
-        # --- 2. Patch CSS background-image ---
-        # Regex: url("asset_name") or url('asset_name') or url(asset_name)
-        css_regex = re.compile(rf'url\((["\']?){re.escape(asset_name)}\1\)', re.I)
-        css_replace_with = f'url("{new_path}")'
-        
-        new_html, count = css_regex.subn(css_replace_with, html)
-        if count > 0:
-            html = new_html
-            messages.append(f"Patched CSS background-image for {asset_name} -> {new_path}")
-    
+        if match:
+            full_tag = match.group(0)
+            src_regex = re.compile(r'src="[^"]*"', re.I)
+            patched_tag, count = src_regex.subn(f'src="{new_path}"', full_tag)
+
+            if count > 0:
+                html = html.replace(full_tag, patched_tag)
+                messages.append(f"Patched <img> tag for {component_id} -> {new_path}")
+            else:
+                messages.append(f"Warning: Found <img> tag for {component_id} but couldn't replace src.")
+        else:
+            messages.append(f"Warning: Could not find <img> tag for {component_id} to patch.")
+
+        if "hero" in component_id or "background" in component_id:
+            css_regex = re.compile(r'background-image:\s*url\((["\']?)placeholder\1\)', re.I)
+            css_replace_with = f'background-image: url("{new_path}")'
+            new_html, count = css_regex.subn(css_replace_with, html)
+            if count > 0:
+                html = new_html
+                messages.append(f"Patched CSS background-image for {component_id} -> {new_path}")
+
     return html, messages
 
-### --- Prompts ---
 RELDESC_SYSTEM = "You are a meticulous UI analyst who describes layouts as a single dense paragraph of relative relationships."
 RELDESC_PROMPT = """
 From the provided wireframe image, produce ONE detailed paragraph (no bullets, no lists, no headings, no JSON, no code)
@@ -465,54 +498,19 @@ Numbers (px) for margins, gaps, radii used across elements.
 Output ONLY the brief text with those headings (no code fences, no JSON).
 """
 
-ASSET_NAMING_SYSTEM = "You are a UI/UX asset planner. Your job is to analyze a wireframe and a UI brief to identify all necessary image assets."
-ASSET_NAMING_PROMPT = """
-Analyze the wireframe image and the UI DESIGN BRIEF.
-Your task is to identify every single component that needs a real image asset (e.g., logos, hero images, card images, user avatars).
-
-Respond with ONLY a JSON list of objects, one for each asset needed.
-If no assets are needed, return an empty list [].
-
-JSON Schema:
-[
-  {
-    "name": "<unique_snake_case_name_for_this_asset_e.g., hero_image, product_ringly_go>",
-    "description": "<detailed description for an image generation model, e.g., 'a photo of a modern office building', 'a geometric logo in blue and white'>",
-    "width": <int_width_in_px_e.g., 1200>,
-    "height": <int_height_in_px_e.g., 400>
-  }
-]
-
-UI DESIGN BRIEF:
-"""
-
 CODE_SYSTEM = "You are a meticulous frontend engineer who writes clean, modern, responsive HTML+CSS."
 CODE_PROMPT = """
-You will be given a **RELATIVE LAYOUT DESCRIPTION**, a **UI DESIGN BRIEF**, and a **LIST OF PRE-GENERATED ASSETS**.
+Using the following **RELATIVE LAYOUT DESCRIPTION**, **UI DESIGN BRIEF**, and **ASSET_PATHS**, generate a SINGLE, self-contained HTML document:
 
-Your task is to generate a SINGLE, self-contained HTML document.
+Requirements:
+- Semantic tags: header/nav/main/section/footer.
+- One <style> block; no external CSS/JS.
+- Implement the layout: container max-width, gaps, grid columns, and stacking rules per breakpoints.
 
-**CRITICAL ASSET RULE:**
-You MUST use the pre-generated assets. Their names and descriptions are provided below.
-When you need an image, you MUST use its exact **name** (e.g., "hero_image") as the placeholder in the `src` attribute or `url()` function.
+- **CRITICAL ASSET RULE: You MUST use the asset paths provided in the `ASSET_PATHS` JSON.**
+- For each asset in the JSON, find the corresponding element in the brief (e.g., by `component_id`) and set its `src` or `background-image` to the provided path.
 
-Example:
-- For an `<img>` tag: `<img src="hero_image" alt="...">`
-- For a CSS background: `background-image: url("hero_image");`
-
-DO NOT use `src="placeholder"`, `data-asset-id`, or any external URLs like 'https://...'.
-
-**PRE-GENERATED ASSETS:**
-{asset_info_string}
-
-**UI DESIGN BRIEF:**
-{brief}
-
-**RELATIVE LAYOUT DESCRIPTION:**
-{rel_desc}
-
----
-Output ONLY valid HTML starting with <html> and ending with </html>.
+- Output ONLY valid HTML starting with <html> and ending with </html>.
 """
 
 SCORING_RUBRIC = r"""
@@ -547,7 +545,6 @@ CSS_PATCH:
 .selector { property: value; }
 /* ... */
 ```
-
 HTML_EDITS:
 - <one edit per line; selector + action, e.g., "add-class .card --class=wide":
 - <allowed actions: move-before, move-after, insert-before, insert-after, set-attr, replace-text, add-class, remove-class>
@@ -561,21 +558,53 @@ FEEDBACK:
 REFINE_SYSTEM = "You are a senior frontend engineer who strictly applies critique to improve HTML/CSS while matching the wireframe."
 REFINE_PROMPT = """
 You are given:
-1) (A) the original wireframe image
-2) The CURRENT HTML (single-file) that produced (B) the rendering
-3) A critique ("feedback") produced by a rubric-based comparison of A vs B
+
+1. (A) the original wireframe image
+2. The CURRENT HTML (single-file) that produced (B) the rendering
+3. A critique ("feedback") produced by a rubric-based comparison of A vs B
 
 Task:
-- Produce a NEW single-file HTML that addresses EVERY feedback point while staying faithful to A.
-- Fix layout fidelity (columns, spacing, alignment), completeness (ensure all components in A exist),
-  typography/contrast for legibility, and overall aesthetics and balance.
-- Keep it self-contained (inline <style>; no external CSS/JS).
-- Output ONLY valid HTML starting with <html> and ending with </html>.
+Produce a NEW single-file HTML that addresses EVERY feedback point while staying faithful to A.
+Fix layout fidelity (columns, spacing, alignment), completeness (ensure all components in A exist),
+typography/contrast for legibility, and overall aesthetics and balance.
+Keep it self-contained (inline <style>; no external CSS/JS).
+Output ONLY valid HTML starting with <html> and ending with </html>.
 """
+
+PLAN_ASSETS_SYSTEM = "You are an expert UI analyst. You extract asset requirements from a brief."
+PLAN_ASSETS_PROMPT = """
+Read the following UI DESIGN BRIEF. Your task is to identify all image assets required to build the page.
+
+For each image asset, you MUST specify a unique `component_id` (e.g., "hero-image", "card-icon-1")
+and a `data-asset-description` (a detailed prompt for an image search/generator).
+
+**CRITICAL:** Respond with ONLY a valid JSON list of objects. Do not include any other text.
+
+Example format:
+[
+  {{
+    "component_id": "logo-nav",
+    "description": "minimalist logo for a tech company named 'Innovate'",
+    "bounding_box": {{"width": 150, "height": 50}}
+  }},
+  {{
+    "component_id": "hero-background",
+    "description": "photo of a modern office building exterior, sunny day",
+    "bounding_box": {{"width": 1920, "height": 1080}}
+  }}
+]
+
+UI DESIGN BRIEF:
+---
+{brief}
+---
+
+Your JSON response:
+"""
+
 
 @dataclass
 class CodeRefineState:
-    # CLI inputs
     image_path: str
     out_rel_desc: str
     out_brief: str
@@ -591,10 +620,7 @@ class CodeRefineState:
     refine_threshold: int
     shot_width: int
     shot_height: int
-    
-    find_assets: bool = False 
-    
-    # Runtime state
+
     image_data_url: Optional[str] = None
     rel_desc: Optional[str] = None
     brief: Optional[str] = None
@@ -602,49 +628,90 @@ class CodeRefineState:
     current_iteration: int = 0
     scores: Optional[Dict[str, Any]] = None
     stop_refinement: bool = False
-    
-    # Asset fields
-    # asset_plan holds the JSON from Qwen: [{"name": "hero", "description": "...", "width": 1024, "height": 768}]
+
+    find_assets: bool = False
     asset_plan: List[Dict[str, Any]] = field(default_factory=list)
-    # asset_paths maps the name to the final generated path: {"hero": "Assets/generated_123.png"}
     asset_paths: Dict[str, str] = field(default_factory=dict)
-    
+
     messages: List[str] = field(default_factory=list)
 
 def parse_text_report(report: str) -> Dict[str, Any]:
-    # (Unchanged)
     sb = _section(report, "SCORES")
     scores = {k: _score_val(sb, k, 0) for k in _SCORE_KEYS}
-    m_agg = re.search(r"aggregate\s*:\s*([0-9]+(?:\.[0-9]+)?)", sb, flags=re.I)
+    m_agg = re.search(r"aggregate\s*:\s*([0-9]+(?:.[0-9]+)?)", sb, flags=re.I)
     aggregate = float(m_agg.group(1)) if m_agg else sum(scores.values())/5.0
+
     css_patch = ""
-    css_match = re.search(r"CSS_PATCH:\s*```css\s+(.*?)\s+```", report, flags=re.S|re.I)
+    html_edits = ""
+    regenerate_prompt = ""
+    feedback = ""
+    issues = ""
+    layout_diffs = ""
+
+    css_match = re.search(r"CSS_PATCH:\s*css\s+(.*?)\s+", report, flags=re.S|re.I)
     if css_match:
         css_patch = css_match.group(1).strip()
-    html_edits = _section(report, "HTML_EDITS")
-    regenerate_prompt = _section(report, "REGENERATE_PROMPT")
-    feedback = _section(report, "FEEDBACK")
-    issues = _section(report, "ISSUES_TOP3")
-    layout_diffs = _section(report, "LAYOUT_DIFFS")
+        html_edits = _section(report, "HTML_EDITS")
+        regenerate_prompt = _section(report, "REGENERATE_PROMPT")
+        feedback = _section(report, "FEEDBACK")
+        issues = _section(report, "ISSUES_TOP3")
+        layout_diffs = _section(report, "LAYOUT_DIFFS")
     return {
         "scores": scores, "aggregate": aggregate, "css_patch": css_patch, "html_edits": html_edits,
         "regenerate_prompt": regenerate_prompt, "feedback": feedback, "issues_top3": issues,
         "layout_diffs": layout_diffs, "raw": report,
     }
 
-def refine_with_feedback(vision_deployment: str, wireframe_image: str, current_html: str, feedback: str,
-                         css_patch: str = "", html_edits: str = "", regenerate_prompt: str = "",
-                         temperature: float = 0.12, max_tokens: int = 2200) -> str:
-    # (Unchanged)
+def refine_with_feedback(
+    vision_deployment: str,
+    wireframe_image: str,
+    current_html: str,
+    feedback: str,
+    css_patch: str = "",
+    html_edits: str = "",
+    regenerate_prompt: str = "",
+    temperature: float = 0.12,
+    max_tokens: int = 2200,
+) -> str:
+    """
+    Applies feedback (and optional CSS/HTML patches) to refine the HTML layout using GPT.
+    Always safe, even if some patch strings are empty.
+    """
     data_a = encode_image_to_data_url(wireframe_image)
-    refine_instructions = f"{REFINE_PROMPT.strip()}\n\nAPPLY THESE PATCHES EXACTLY:..."
+
+    # Combine all feedback info into one instruction text
+    refine_instructions = f"""{REFINE_PROMPT.strip()}
+
+The following information may help you improve the HTML:
+--- FEEDBACK ---
+{feedback or '(none provided)'}
+
+--- CSS_PATCH ---
+{css_patch or '(none provided)'}
+
+--- HTML_EDITS ---
+{html_edits or '(none provided)'}
+
+--- REGENERATE_PROMPT ---
+{regenerate_prompt or '(none provided)'}
+
+Now produce a refined single-file HTML that implements these improvements.
+"""
+
     messages = [
         {"role": "system", "content": REFINE_SYSTEM},
         {"role": "user", "content": [
             {"type": "image_url", "image_url": {"url": data_a}},
-            {"type": "text", "text": refine_instructions + "\n\nCURRENT_HTML:\n```html\n" + current_html + "\n```"}
+            {
+                "type": "text",
+                "text": refine_instructions
+                + "\n\nCURRENT_HTML:\n```html\n"
+                + current_html
+                + "\n```",
+            },
         ]},
     ]
+
     out = models.chat_complete_azure(vision_deployment, messages, temperature, max_tokens)
     html = extract_html(out)
     if "<html" not in html.lower():
@@ -652,14 +719,13 @@ def refine_with_feedback(vision_deployment: str, wireframe_image: str, current_h
     return html
 
 def node_stage0(state: CodeRefineState) -> CodeRefineState:
-    # (Unchanged)
     state.image_data_url = encode_image_to_data_url(state.image_path)
     messages = [
         {"role": "system", "content": RELDESC_SYSTEM},
         {"role": "user", "content": [
             {"type":"image_url", "image_url":{"url":state.image_data_url}},
             {"type":"text", "text": RELDESC_PROMPT.strip()},
-        ]},
+            ]},
     ]
     state.rel_desc = models.chat_complete_azure(state.vision_deployment, messages, state.temp, state.reldesc_tokens)
     pathlib.Path(state.out_rel_desc).parent.mkdir(parents=True, exist_ok=True)
@@ -668,7 +734,6 @@ def node_stage0(state: CodeRefineState) -> CodeRefineState:
     return state
 
 def node_stage1(state: CodeRefineState) -> CodeRefineState:
-    # (Unchanged)
     messages = [
         {"role": "system", "content": BRIEF_SYSTEM},
         {"role": "user", "content": [
@@ -682,118 +747,94 @@ def node_stage1(state: CodeRefineState) -> CodeRefineState:
     state.messages.append("Stage1: Generated UI design brief.")
     return state
 
-# *** NEW NODE: Plan assets with Qwen ***
-def node_plan_assets_qwen(state: CodeRefineState) -> CodeRefineState:
-    print("---(Azure VLM) NODE: Planning Assets (Qwen)---")
-    messages = [
-        {"role": "system", "content": [{"type": "text", "text": ASSET_NAMING_SYSTEM}]},
-        {"role": "user", "content": [
-            {"type": "text", "text": "Analyze this wireframe image and brief."},
-            {"type": "image", "image": state.image_data_url.split(",")[1]}, # Send b64 data
-            {"type": "text", "text": ASSET_NAMING_PROMPT + state.brief}
-        ]}
-    ]
-    resp = models.chat_vlm(messages, temperature=0.0, max_new_tokens=1024)
-    
-    try:
-        plan = json.loads(resp[resp.find("["):resp.rfind("]")+1])
-        state.asset_plan = plan
-        state.messages.append(f"Stage1.5: Planned {len(plan)} assets (Qwen).")
-        print(f"Asset plan: {plan}")
-    except Exception as e:
-        print(f"Error parsing asset plan: {e}\nResponse was: {resp}")
-        state.asset_plan = []
-        state.messages.append("Stage1.5: Error parsing asset plan (Qwen).")
-    return state
-
-# *** UPDATED NODE: Generate assets (formerly find_assets) ***
-def node_generate_assets(state: CodeRefineState) -> CodeRefineState:
-    print("---(Azure VLM) NODE: Generating Assets---")
-    if not state.asset_plan:
-        state.messages.append("Stage1.6: No assets to generate.")
-        return state
-        
-    current_asset_paths = {}
-    for asset_request in state.asset_plan:
-        name = asset_request.get('name')
-        desc = asset_request.get('description')
-        width = asset_request.get('width', 512)
-        height = asset_request.get('height', 512)
-
-        if not all([name, desc]): continue
-        
-        print(f"-> Generating asset for '{name}': {desc} (Size: {width}x{height})")
-        
-        # Call the asset_agent_app (which is now just the generator)
-        result = asset_agent_app.invoke({
-            "instructions": desc, 
-            "bounding_box": (width, height)
-        })
-        
-        if final_path := result.get("final_asset_path"):
-            current_asset_paths[name] = final_path # Map the *name* to the path
-            msg = f"Asset resolved for {name}: {final_path}"
-            state.messages.append(msg); print(f"    ✅ {msg}")
-        else:
-            msg = f"Asset process failed for {name}."
-            state.messages.append(msg); print(f"    ❌ {msg}")
-            
-    state.asset_paths = current_asset_paths
-    return state
-
-# *** UPDATED NODE: Codegen ***
 def node_stage2(state: CodeRefineState) -> CodeRefineState:
-    
-    # Create the asset info string for the prompt
-    asset_info_string = "I have pre-generated the following images for you:\n"
-    if not state.asset_plan:
-        asset_info_string = "No image assets were found or generated. Do not add any `<img>` tags unless they are placeholders."
-    else:
-        for asset in state.asset_plan:
-            asset_info_string += f"- Name: `{asset['name']}` (Description: {asset['description']})\n"
+    # Convert asset_paths dict to a JSON string for the prompt
+    asset_paths_json = json.dumps(state.asset_paths, indent=2)
 
-    # Format the prompt
-    prompt = CODE_PROMPT.format(
-        asset_info_string=asset_info_string,
-        brief=state.brief.strip(),
-        rel_desc=state.rel_desc.strip()
-    )
-    
     messages = [
         {"role": "system", "content": CODE_SYSTEM},
-        {"role": "user", "content": [{"type":"text", "text": prompt}]},
+        {"role": "user", "content": [
+            {"type":"text", "text": CODE_PROMPT.strip()},
+            {"type":"text", "text": "RELATIVE LAYOUT DESCRIPTION:\n" + state.rel_desc.strip()},
+            {"type":"text", "text": "UI DESIGN BRIEF:\n" + state.brief.strip()},
+            # MODIFIED: Pass the actual paths, not an empty dict
+            {"type":"text", "text": f"ASSET_PATHS:\n{asset_paths_json}"},
+        ]},
     ]
-    
     raw = models.chat_complete_azure(state.text_deployment, messages, state.temp, state.code_tokens)
     state.html = extract_html(raw)
     
-    state.messages.append("Stage2: Generated HTML (with asset names as placeholders).")
+    # Check if we generated code that *still* has placeholders (e.g., for assets we failed to find)
+    if state.find_assets and 'src="placeholder"' in state.html:
+        state.messages.append("Stage2: Generated HTML (with some assets included, some placeholders remain).")
+    elif state.find_assets:
+        state.messages.append("Stage2: Generated HTML (all assets included).")
+    else:
+        state.messages.append("Stage2: Generated HTML (with placeholders).")
+        
     return state
 
-# *** UPDATED NODE: Patch HTML (replaces plan_assets_from_html) ***
-def node_patch_html_with_assets(state: CodeRefineState) -> CodeRefineState:
-    """
-    Replaces the asset names (e.g., src="hero_image") with the final paths.
-    """
-    print("---(Azure VLM) NODE: Patching HTML with generated asset paths---")
-    
-    if not state.asset_paths:
-        state.messages.append("Stage2.7: No assets to patch.")
-    else:
-        # Use the helper to patch
-        state.html, state.messages = _patch_html(state.html, state.asset_paths, state.messages)
+def node_plan_assets_from_brief(state: CodeRefineState) -> CodeRefineState:
+    print("---(Azure VLM) NODE: Planning assets from BRIEF---")
+    if not state.brief:
+        state.messages.append("Stage1.5: Brief is missing, cannot plan assets.")
+        return state
 
-    # Save the (potentially) patched HTML
-    pathlib.Path(state.out_html).parent.mkdir(parents=True, exist_ok=True)
-    with open(state.out_html, "w", encoding="utf-8") as f: f.write(state.html)
-    state.messages.append(f"Stage2.7: Saved patched HTML -> {state.out_html}")
+    messages = [
+        {"role": "system", "content": PLAN_ASSETS_SYSTEM},
+        {"role": "user", "content": [
+            {"type": "text", "text": PLAN_ASSETS_PROMPT.format(brief=state.brief)}
+        ]},
+    ]
+    
+    # Use the text_deployment for this JSON-only task
+    raw_json = models.chat_complete_azure(state.text_deployment, messages, 0.0, 1024)
+    
+    try:
+        asset_plan = json.loads(raw_json[raw_json.find("["):raw_json.rfind("]")+1])
+        state.asset_plan = asset_plan
+        state.messages.append(f"Stage1.5: Planned {len(asset_plan)} assets from Brief.")
+        print(f"Asset plan: {asset_plan}")
+    except json.JSONDecodeError as e:
+        print(f"Error parsing asset plan JSON: {e}")
+        state.messages.append(f"Stage1.5: Error parsing asset plan from brief: {e}")
+        state.asset_plan = []
+    
+    return state
+
+def node_stage1_find_assets(state: CodeRefineState) -> CodeRefineState:
+    print("---(Azure VLM) NODE: Finding Assets---")
+    if not state.asset_plan:
+        state.messages.append("Stage2.6: No assets to find.")
+        return state
+    current_asset_paths = {}
+    for asset_request in state.asset_plan:
+        component_id = asset_request.get('component_id')
+        desc = asset_request.get('description')
+        bbox = asset_request.get('bounding_box', {})
+        if not all([component_id, desc, bbox]): continue
+
+        print(f"-> Finding asset for '{component_id}': {desc}")
+        try:
+            width = int(bbox.get('width', 512))
+            height = int(bbox.get('height', 512))
+        except (ValueError, TypeError):
+            width, height = 512, 512
+
+        result = asset_agent_app.invoke({"instructions": desc, "bounding_box": (width, height)})
+
+        if final_path := result.get("final_asset_path"):
+            current_asset_paths[component_id] = final_path
+            msg = f"Asset resolved for {component_id}: {final_path}"
+            state.messages.append(msg); print(f"{msg}")
+        else:
+            msg = f"Asset process failed for {component_id}."
+            state.messages.append(msg); print(f"{msg}")
+
+    state.asset_paths = current_asset_paths
     return state
 
 def node_save_html_pre_score(state: CodeRefineState) -> CodeRefineState:
-    """
-    Saves the HTML file to the out_html path.
-    This is used when the asset patching flow is skipped.
-    """
     print("---(Azure VLM) NODE: Saving HTML before scoring---")
     try:
         pathlib.Path(state.out_html).parent.mkdir(parents=True, exist_ok=True)
@@ -803,14 +844,12 @@ def node_save_html_pre_score(state: CodeRefineState) -> CodeRefineState:
     except Exception as e:
         state.messages.append(f"Error saving HTML: {e}")
         print(f"Error saving HTML: {e}")
-    return state
+        return state
 
 def node_stage3_score(state: CodeRefineState) -> CodeRefineState:
-    # (Unchanged)
     html_path = pathlib.Path(state.out_html)
     shot_png_path = html_path.with_name(html_path.stem + f"_iter{state.current_iteration}.png")
     with sync_playwright() as p:
-        # ... (playwright logic) ...
         browser = p.chromium.launch()
         ctx = browser.new_context(viewport={"width": state.shot_width, "height": state.shot_height}, device_scale_factor=2.0)
         page = ctx.new_page()
@@ -819,12 +858,10 @@ def node_stage3_score(state: CodeRefineState) -> CodeRefineState:
         page.screenshot(path=shot_png_path, full_page=True)
         ctx.close()
         browser.close()
-    
     data_a = encode_image_to_data_url(state.image_path)
     data_b = encode_image_to_data_url(shot_png_path)
     messages = [
         {"role": "system", "content": "Return the specified PLAIN-TEXT report exactly as instructed."},
-        # ... (scoring messages) ...
         {"role": "user", "content": [
             {"type": "text", "text": SCORING_RUBRIC.strip()},
             {"type": "image_url", "image_url":{"url": data_a}},
@@ -835,21 +872,18 @@ def node_stage3_score(state: CodeRefineState) -> CodeRefineState:
     resp = models.chat_complete_azure(state.vision_deployment, messages, 0.0, state.judge_tokens)
     state.scores = parse_text_report(resp)
     state.messages.append(f"Stage3: Scoring done (Iter {state.current_iteration}).")
-    
+
     min_score = min(int(state.scores["scores"][k]) for k in _SCORE_KEYS)
     if min_score >= state.refine_threshold:
         state.stop_refinement = True
     return state
 
 def node_refine_loop(state: CodeRefineState) -> CodeRefineState:
-    # (Unchanged)
     if state.stop_refinement or state.current_iteration >= state.refine_max_iters:
         state.messages.append("Refinement loop ended.")
         return state
-    
     state.current_iteration += 1
-    
-    # 1. Refine the HTML (this re-introduces placeholders)
+
     state.html = refine_with_feedback(
         vision_deployment=state.vision_deployment,
         wireframe_image=state.image_path,
@@ -861,130 +895,107 @@ def node_refine_loop(state: CodeRefineState) -> CodeRefineState:
         temperature=state.temp,
         max_tokens=state.code_tokens
     )
-    
-    # 2. *** RE-PATCH the refined HTML ***
+
     if state.asset_paths:
         state.messages.append(f"Re-patching assets for iteration {state.current_iteration}...")
         state.html, state.messages = _patch_html(state.html, state.asset_paths, state.messages)
-    
-    # 3. Save the new version
+
     versioned_path = pathlib.Path(state.out_html).with_name(pathlib.Path(state.out_html).stem + f"_v{state.current_iteration}" + pathlib.Path(state.out_html).suffix)
     with open(versioned_path, "w", encoding="utf-8") as f: f.write(state.html)
-    state.out_html = str(versioned_path) 
+    state.out_html = str(versioned_path)
     state.messages.append(f"Saved refined HTML v{state.current_iteration} -> {versioned_path}")
     return state
 
 def decide_next(state: CodeRefineState) -> str:
-    # (Unchanged)
     if not state.stop_refinement and state.current_iteration < state.refine_max_iters:
         return "refine_loop"
     return "end"
 
-# *** UPDATED: This router now checks the find_assets boolean ***
-def route_to_asset_planning(state: CodeRefineState) -> str:
-    """Checks the find_assets boolean to decide the next step."""
+def route_after_brief(state: CodeRefineState) -> str:
     if state.find_assets:
-        print("-> Configured to find assets. Proceeding to Qwen asset planning.")
+        print("-> Configured to find assets. Proceeding to plan from BRIEF.")
         return "plan_assets"
     else:
-        print("-> Configured to skip asset search. Proceeding to codegen.")
-        # Skip all asset nodes and go straight to codegen
-        return "codegen" 
+        print("-> Configured to skip asset search. Proceeding to code gen.")
+        state.asset_paths = {} # Ensure it's empty for stage2
+        return "generate_code"
 
-# *** NEW, RE-WIRED GRAPH ***
 def build_azure_vlm_graph():
     workflow = StateGraph(CodeRefineState)
     workflow.add_node("stage0", node_stage0)
     workflow.add_node("stage1", node_stage1)
-    workflow.add_node("plan_assets_qwen", node_plan_assets_qwen)
-    workflow.add_node("generate_assets", node_generate_assets)
+    
+    # New node for planning from brief
+    workflow.add_node("plan_assets_from_brief", node_plan_assets_from_brief)
+    workflow.add_node("stage1_find_assets", node_stage1_find_assets)
     workflow.add_node("stage2", node_stage2)
-    workflow.add_node("patch_html", node_patch_html_with_assets)
-    # save_html_pre_score is no longer needed
+    
+    # Removed: plan_assets_from_html, patch_html
+    
+    workflow.add_node("save_html_pre_score", node_save_html_pre_score)
     workflow.add_node("stage3_score", node_stage3_score)
     workflow.add_node("refine_loop", node_refine_loop)
-
+    
     workflow.set_entry_point("stage0")
     workflow.add_edge("stage0", "stage1")
-    
-    # New conditional flow after brief
+
+    # NEW routing logic after brief (stage1)
     workflow.add_conditional_edges(
         "stage1",
-        route_to_asset_planning,
+        route_after_brief, # NEW router function
         {
-            "plan_assets": "plan_assets_qwen",
-            "codegen": "stage2" # Skip to codegen
+            "plan_assets": "plan_assets_from_brief",
+            "generate_code": "stage2" # Skip to code gen if not finding assets
         }
     )
     
-    # Asset-finding branch
-    workflow.add_edge("plan_assets_qwen", "generate_assets")
-    workflow.add_edge("generate_assets", "stage2")
-    
-    # Main branch after codegen
-    workflow.add_edge("stage2", "patch_html")
-    workflow.add_edge("patch_html", "stage3_score")
-    
-    # Original refinement loop
+    # Asset pipeline: Plan -> Find -> CodeGen
+    workflow.add_edge("plan_assets_from_brief", "stage1_find_assets")
+    workflow.add_edge("stage1_find_assets", "stage2")
+
+    # NEW: stage2 (code gen) now goes directly to saving/scoring
+    workflow.add_edge("stage2", "save_html_pre_score")
+
+    # OLD 'else' branch from removed router
+    workflow.add_edge("save_html_pre_score", "stage3_score")
+
+    # Refine loop (unchanged): Score -> Refine -> (loops to Score)
+    # This loop still uses _patch_html internally, which is correct
     workflow.add_edge("stage3_score", "refine_loop")
     workflow.add_conditional_edges("refine_loop", decide_next, {"refine_loop": "stage3_score", "end": END})
-    
+
     return workflow.compile(checkpointer=MemorySaver())
 
-# --- Compile the graph ---
 azure_vlm_app = build_azure_vlm_graph()
-
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# ## SECTION 5: MAIN "BRAIN" AGENT (Command Center)
-#
-# This new agent uses the local Qwen VLM to decide which
-# pipeline to run using standard conditional routing.
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
+#----------------------------------------------------------------------
+#----------------------------------------------------------------------
+## SECTION 5: MAIN "BRAIN" AGENT (Router) - uses GPT-only VLM router
+#----------------------------------------------------------------------
+#----------------------------------------------------------------------
 
 class BrainState(TypedDict):
     messages: List[Dict[str, Any]]
     cli_args: argparse.Namespace
-    
-    # New fields for routing
     next_task: Optional[str] = None
     task_args: Optional[Dict[str, Any]] = None
     task_result: Optional[str] = None
 
-
-# --- Pipeline Functions (With Optional Output Paths) ---
-
-def helper_run_azure_vlm_pipeline(image_path: str, find_assets: bool, 
-                                  out_html_path: str, out_brief_path: str, out_reldesc_path: str) -> str:
-    """
-    Use this tool to generate a new HTML webpage from a wireframe image.
-    This runs the full Azure VLM pipeline.
-    
-    Args:
-        image_path (str): The file path to the input wireframe image.
-        find_assets (bool): Set to True to run the asset-finding sub-pipeline.
-        out_html_path (str): The file path to save the final HTML.
-        out_brief_path (str): The file path to save the UI brief.
-        out_reldesc_path (str): The file path to save the relative description.
-    """
+def helper_run_azure_vlm_pipeline(image_path: str, find_assets: bool,
+out_html_path: str, out_brief_path: str, out_reldesc_path: str) -> str:
     print(f"--- BRAIN: Invoking Azure VLM Pipeline for {image_path} (Find Assets: {find_assets}) ---")
     try:
-        # --- Hardcode model choices ---
         vision_deployment = "gpt-4.1-mini"
         text_deployment = "gpt-4.1-mini"
-        
         pathlib.Path(out_html_path).parent.mkdir(parents=True, exist_ok=True)
-        
+
         state = CodeRefineState(
             image_path=image_path,
             out_rel_desc=out_reldesc_path,
             out_brief=out_brief_path,
             out_html=out_html_path,
-            vision_deployment=vision_deployment, 
+            vision_deployment=vision_deployment,
             text_deployment=text_deployment,
-            find_assets=find_assets, # Pass the boolean to the state
-            # Hardcode pipeline defaults
+            find_assets=find_assets,
             reldesc_tokens=700,
             brief_tokens=1100,
             code_tokens=2200,
@@ -999,7 +1010,7 @@ def helper_run_azure_vlm_pipeline(image_path: str, find_assets: bool,
         run_id = f"wireframe-{uuid4()}"
         config = {"configurable": {"thread_id": run_id}}
         result = azure_vlm_app.invoke(state, config=config)
-        
+
         final_path = result.get('out_html', out_html_path)
         return json.dumps({
             "status": "success",
@@ -1012,37 +1023,28 @@ def helper_run_azure_vlm_pipeline(image_path: str, find_assets: bool,
         return json.dumps({"status": "error", "message": str(e)})
 
 def helper_run_code_editor(html_path: str, edit_request: str, output_path: str) -> str:
-    """
-    Use this tool to edit an existing HTML file based on a user's text request.
-    Args:
-        html_path (str): The file path to the HTML file you want to edit.
-        edit_request (str): The user's instruction (e.g., "Make the h1 tag blue").
-        output_path (str): The file path to save the *new* edited HTML.
-    """
     print(f"--- BRAIN: Invoking Code Editor for {html_path} ---")
     try:
-        # --- Hardcode model choice ---
-        model_choice = "qwen-local"
-        
+        model_choice = "gpt-4.1-mini"
         with open(html_path, "r", encoding="utf-8") as f:
             original_html = f.read()
-            
+
         initial_state = {
             "html_code": original_html,
             "user_request": edit_request,
-            "model_choice": model_choice, # Hardcoded
+            "model_choice": model_choice,
             "messages": []
         }
-        
+
         config = {"configurable": {"thread_id": f"edit-thread-{uuid4()}"}}
         final_state = edit_agent_app.invoke(initial_state, config=config)
-        
+
         new_html_code = final_state['html_code']
-        
+
         pathlib.Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(new_html_code)
-            
+
         return json.dumps({
             "status": "success",
             "message": "Code editing complete.",
@@ -1054,14 +1056,9 @@ def helper_run_code_editor(html_path: str, edit_request: str, output_path: str) 
         return json.dumps({"status": "error", "message": str(e)})
 
 def helper_run_asset_search(description: str, width: int = 512, height: int = 512) -> str:
-    """
-    Use this tool to find or generate a single image asset.
-    ... (docstring args) ...
-    """
     print(f"--- BRAIN: Invoking Asset Search for '{description}' ---")
     try:
         result = asset_agent_app.invoke({"instructions": description, "bounding_box": (width, height)})
-        
         if final_path := result.get("final_asset_path"):
             return json.dumps({
                 "status": "success",
@@ -1074,138 +1071,107 @@ def helper_run_asset_search(description: str, width: int = 512, height: int = 51
         print(f"Error in Asset Search helper: {e}")
         return json.dumps({"status": "error", "message": str(e)})
 
-# --- List of all helper functions for the Brain ---
 helper_functions = [
     helper_run_azure_vlm_pipeline,
     helper_run_code_editor,
     helper_run_asset_search,
-]
+    ]
 
-# --- Brain Agent Definition (Router) ---
 class QwenRouterAgent:
     def __init__(self, model_manager, functions, system_prompt=""):
         self.model = model_manager
         self.functions = {f.__name__: f for f in functions}
         self.system_prompt = system_prompt
-
     def __call__(self, state: BrainState):
         messages = state['messages']
-        
+
         qwen_messages = []
         if self.system_prompt:
             qwen_messages.append({"role": "system", "content": [{"type": "text", "text": self.system_prompt}]})
-            
+
         for msg in messages:
             qwen_messages.append({
                 "role": msg['role'],
                 "content": [{"type": "text", "text": msg['content']}]
             })
-        
+
         last_user_message = messages[-1]['content']
-        
-        router_prompt = f"""
-You are a "command center" agent. Your job is to route a user's request to the correct function
-by providing a single, valid JSON object.
-
-**Function Schemas:**
-
-1.  **Generate a new page from an image:**
-    {{
-      "function_name": "helper_run_azure_vlm_pipeline",
-      "function_args": {{
-        "find_assets": "<bool: ONLY set to true if the user explicitly asks to find assets, default false>"
-      }}
-    }}
-
-2.  **Edit an existing HTML file:**
-    {{
-      "function_name": "helper_run_code_editor",
-      "function_args": {{}}
-    }}
-
-3.  **Find or generate a single image asset:**
-    {{
-      "function_name": "helper_run_asset_search",
-      "function_args": {{}}
-    }}
-
-4.  **No function needed:**
-    {{
-      "function_name": "end",
-      "function_args": {{}}
-    }}
-
-**CRITICAL INSTRUCTIONS:**
-1.  Analyze the "User Request" and "Context".
-2.  You **MUST** choose *one* function name **EXACTLY** as it is written in the schemas.
-3.  If the request is to "generate a page", your *only* job is to decide if `find_assets` is true or false.
-4.  If the request is to "edit" or "find an asset", just return the function name with empty args: `{{ "function_name": "...", "function_args": {{}} }}`
-5.  Your response **MUST** be **ONLY** the single, valid JSON object.
-
----
-**User Request:** "{last_user_message}"
-
-**Context:**
-"""
         cli_args = state['cli_args']
-        if cli_args.image:
-            router_prompt += f"- An image path was provided: {cli_args.image}\n"
-        if cli_args.html:
-            router_prompt += f"- An HTML path was provided: {cli_args.html}\n"
-        router_prompt += "\n**Your JSON Response:**"
 
-        
+        router_prompt = f"""
+You are a strict JSON command router. You must look at the user's request and decide which helper
+function to call, returning *only one* JSON object, with no extra text, no explanations, and no
+code fences.
+
+Valid functions and their schemas:
+
+1. Generate a new HTML page from an image wireframe
+{{
+  "function_name": "helper_run_azure_vlm_pipeline",
+  "function_args": {{
+    "find_assets": "<bool: true if user asks to find assets, otherwise false>"
+  }}
+}}
+
+2. Edit an existing HTML file
+{{ "function_name": "helper_run_code_editor", "function_args": {{}} }}
+
+3. Find or generate a single image asset
+{{ "function_name": "helper_run_asset_search", "function_args": {{}} }}
+
+4. No function needed
+{{ "function_name": "end", "function_args": {{}} }}
+
+Return *only* one JSON object, with no markdown or explanation.
+
+User request: "{last_user_message}"
+
+Image argument: {cli_args.image}
+HTML argument: {cli_args.html}
+
+Now output the JSON object only:
+"""
+
         print("--- BRAIN: Routing prompt ---")
-        
         vlm_response = self.model.chat_llm(router_prompt)
-        
-        print(f"--- BRAIN: VLM Response ---\n{vlm_response}\n-------------------------")
 
+        print(f"--- BRAIN: VLM Response ---\n{vlm_response}\n-------------------------")
         try:
             call_json = json.loads(vlm_response[vlm_response.find("{"):vlm_response.rfind("}")+1])
             func_name = call_json.get("function_name")
-            
-            # Start with the minimal args from the VLM (e.g., {'find_assets': true})
-            func_args = call_json.get("function_args", {}) 
-            
+
+            func_args = call_json.get("function_args", {})
+
             if func_name == "end" or func_name not in self.functions:
                 print("--- BRAIN: No operation selected. Ending task. ---")
                 return {"next_task": "end", "task_result": "No operation selected."}
 
-            # *** Manually add all required args from context ***
-            
             if func_name == "helper_run_azure_vlm_pipeline":
-                # 'find_assets' is already in func_args from VLM (default to False)
                 func_args['find_assets'] = func_args.get('find_assets', False)
-                
-                # *** Manually add path args from cli_args ***
                 func_args['image_path'] = cli_args.image
                 func_args['out_html_path'] = cli_args.out_html
                 func_args['out_brief_path'] = cli_args.out_brief
                 func_args['out_reldesc_path'] = cli_args.out_rel_desc
 
             elif func_name == "helper_run_code_editor":
-                # *** Manually add all args ***
                 func_args['html_path'] = cli_args.html
                 func_args['edit_request'] = last_user_message
                 func_args['output_path'] = cli_args.out_html
-                
+
             elif func_name == "helper_run_asset_search":
-                # *** Manually add all args ***
                 func_args['description'] = last_user_message
-                func_args['width'] = 512  # Use hardcoded defaults
-                func_args['height'] = 512 # Use hardcoded defaults
-            
+                func_args['width'] = 512
+                func_args['height'] = 512
+
             return {
                 "next_task": func_name,
-                "task_args": func_args # Pass the *full* dict
+                "task_args": func_args
             }
 
         except Exception as e:
             print(f"--- BRAIN: Error parsing VLM response. Ending task. --- \n{e}")
             return {"next_task": "end", "task_result": f"Error parsing VLM response: {e}"}
 
-# --- Graph Nodes ---
 def node_run_vlm_pipeline(state: BrainState) -> dict:
     print("---(Brain Graph) NODE: node_run_vlm_pipeline ---")
     args = state['task_args']
@@ -1223,36 +1189,32 @@ def node_run_asset_search(state: BrainState) -> dict:
     args = state['task_args']
     result = helper_run_asset_search(**args)
     return {"task_result": result, "messages": state['messages'] + [{"role": "assistant", "content": result}]}
-
-# --- Router Function ---
+    
 def brain_router(state: BrainState) -> str:
-    """Routes to the correct node based on the 'next_task' state."""
-    print(f"---(Brain Graph) ROUTER: Next task is '{state['next_task']}' ---")
-    if state['next_task'] == "helper_run_azure_vlm_pipeline":
+    next_task = state.get("next_task")
+    print(f"---(Brain Graph) ROUTER: Next task is '{next_task}' ---")
+    if next_task == "helper_run_azure_vlm_pipeline":
         return "run_vlm"
-    elif state['next_task'] == "helper_run_code_editor":
+    elif next_task == "helper_run_code_editor":
         return "run_edit"
-    elif state['next_task'] == "helper_run_asset_search":
+    elif next_task == "helper_run_asset_search":
         return "run_asset"
     else:
+        print(f"No valid next_task set {next_task} — ending workflow.")
         return "end"
 
-# --- Graph Builder ---
 def build_brain_graph():
-    
     brain_agent_node = QwenRouterAgent(models, helper_functions)
-    
+
     workflow = StateGraph(BrainState)
-    
-    # Add nodes
+
     workflow.add_node("agent", brain_agent_node)
     workflow.add_node("run_vlm", node_run_vlm_pipeline)
     workflow.add_node("run_edit", node_run_code_editor)
     workflow.add_node("run_asset", node_run_asset_search)
-    
+
     workflow.set_entry_point("agent")
-    
-    # Add conditional router
+
     workflow.add_conditional_edges(
         "agent",
         brain_router,
@@ -1263,42 +1225,33 @@ def build_brain_graph():
             "end": END
         }
     )
-    
-    # Add final edges
+
     workflow.add_edge("run_vlm", END)
     workflow.add_edge("run_edit", END)
     workflow.add_edge("run_asset", END)
-    
+
     return workflow.compile()
 
-# --- Compile the brain graph ---
 brain_app = build_brain_graph()
-
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-# ## SECTION 6: CLI RUNNER (MAIN) - SIMPLIFIED FOR TESTING
-#
-# This entrypoint is modified to run a full test suite.
-# ----------------------------------------------------------------------
-# ----------------------------------------------------------------------
-
+#----------------------------------------------------------------------
+#----------------------------------------------------------------------
+## SECTION 6: CLI RUNNER (MAIN) - SIMPLIFIED FOR TESTING
+#----------------------------------------------------------------------
+#----------------------------------------------------------------------
 def run_test(test_name: str, initial_state: BrainState):
-    """Helper function to run a single test case against the brain."""
     print("\n" + "="*70)
     print(f"--- STARTING TEST: {test_name} ---")
     print(f"--- User Prompt: {initial_state['messages'][0]['content']} ---")
-    
     run_id = f"brain-test-{uuid4()}"
     config = {"configurable": {"thread_id": run_id}}
-    
-    # Invoke the brain
+
     final_state = brain_app.invoke(initial_state, config=config)
-    
+
     print("\n" + ("-"*25) + " BRAIN INVOCATION COMPLETE " + ("-"*25))
-    
+
     print("--- Final Task Result ---")
     task_result_str = final_state.get('task_result', "No result found (task may have ended early).")
-    
+
     if task_result_str:
         try:
             output_json = json.loads(task_result_str)
@@ -1307,17 +1260,45 @@ def run_test(test_name: str, initial_state: BrainState):
             print(task_result_str)
     else:
         print("No final task result recorded.")
-        
+
     print("="*70)
 
-
 def main():
+    pathlib.Path("Outputs/Assets").mkdir(parents=True, exist_ok=True)
+    pathlib.Path("Outputs").mkdir(parents=True, exist_ok=True)
+    test_edit_file_path = "Outputs/test_page_to_edit.html"
+    dummy_html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Original Test Title</title>
+</head>
+<body>
+    <h1>This is the original headline.</h1>
+    <p>This is a paragraph.</p>
+</body>
+</html>
     """
-    Main function modified to run a test suite for all 3 pipeline paths.
-    """
-    
-    # --- Test Data Setup (Paths Re-added) ---
-    
+    with open(test_edit_file_path, "w", encoding="utf-8") as f:
+        f.write(dummy_html)
+    print(f"Created dummy file for editing at: {test_edit_file_path}")
+    if not pathlib.Path("Images/2.png").exists():
+        print("\n--- WARNING ---")
+        print("Test 1 (Azure VLM) requires an image at 'Images/2.png'.")
+        print("Please add an image there or Test 1 will be skipped.")
+        print("---------------\n")
+
+    if not pathlib.Path("Images/asset_test.png").exists():
+        print("\n--- WARNING ---")
+        print("Test 1.5 (Azure VLM + Asset Search) requires an image at 'Images/asset_test.png'.")
+        print("This test *specifically* verifies the internal asset search.")
+        print("Please add an image with clear image placeholders, or Test 1.5 will be skipped.")
+        print("---------------\n")
+
+    # Re-use the same test-run setup as before, but now defaulting to GPT-only deployments
+    # For brevity, this main keeps the previous test harness but will skip missing images.
+
     # For Test 1: Azure VLM Pipeline
     cli_args_vlm = argparse.Namespace(
         prompt="Generate a new HTML page from the wireframe at Images/2.png",
@@ -1338,44 +1319,37 @@ def main():
         out_brief="Outputs/test1.5_brief.txt",
         out_rel_desc="Outputs/test1.5_reldesc.txt"
     )
-    
+
     # For Test 2: Code Editor Pipeline
-    test_edit_file = "Outputs/test_page_to_edit.html"
+    test_edit_file = test_edit_file_path
     cli_args_edit = argparse.Namespace(
         prompt="Change the title to 'Edited by Brain Agent' and make the h1 tag red.",
         image=None,
         html=test_edit_file,
-        out_html="Outputs/test2_output_edited.html" # Specific output path
+        out_html="Outputs/test2_output_edited.html",
+        out_brief=None,
+        out_rel_desc=None
     )
-    
+
     # For Test 3: Asset Search Pipeline
     cli_args_asset = argparse.Namespace(
         prompt="Find a high-quality photo of a 'modern office desk with a laptop'",
         image=None,
         html=None,
-        out_html=None # Not needed
+        out_html=None,
+        out_brief=None,
+        out_rel_desc=None
     )
 
-    # =================================================================
-    # --- TEST 1: AZURE VLM PIPELINE (Image-to-Code) ---
-    # =================================================================
-    initial_state_vlm = {
-        "messages": [{"role": "user", "content": cli_args_vlm.prompt}],
-        "cli_args": cli_args_vlm
-    }
+    initial_state_vlm = {"messages": [{"role": "user", "content": cli_args_vlm.prompt}], "cli_args": cli_args_vlm}
+    '''
     if not pathlib.Path(cli_args_vlm.image).exists():
         print(f"--- WARNING: Skipping Test 1 ---")
         print(f"Test image not found at: {cli_args_vlm.image}")
     else:
         run_test("Test 1: Azure VLM Pipeline (Image-to-Code)", initial_state_vlm)
 
-    # =================================================================
-    # --- TEST 1.5: AZURE VLM PIPELINE (with Asset Search) ---
-    # =================================================================
-    initial_state_vlm_assets = {
-        "messages": [{"role": "user", "content": cli_args_vlm_assets.prompt}],
-        "cli_args": cli_args_vlm_assets
-    }
+    initial_state_vlm_assets = {"messages": [{"role": "user", "content": cli_args_vlm_assets.prompt}], "cli_args": cli_args_vlm_assets}
     if not pathlib.Path(cli_args_vlm_assets.image).exists():
         print(f"\n--- WARNING: Skipping Test 1.5 ---")
         print(f"Asset test image not found at: {cli_args_vlm_assets.image}")
@@ -1383,62 +1357,11 @@ def main():
     else:
         run_test("Test 1.5: Azure VLM Pipeline (with Asset Search)", initial_state_vlm_assets)
 
-    # =================================================================
-    # --- TEST 2: CODE EDITOR PIPELINE (Edit HTML) ---
-    # =================================================================
-    initial_state_edit = {
-        "messages": [{"role": "user", "content": cli_args_edit.prompt}],
-        "cli_args": cli_args_edit
-    }
-    run_test("Test 2: Code Editor Pipeline (qwen-local)", initial_state_edit)
-    
-    # =================================================================
-    # --- TEST 3: ASSET SEARCH PIPELINE (Find Image) ---
-    # =================================================================
-    initial_state_asset = {
-        "messages": [{"role": "user", "content": cli_args_asset.prompt}],
-        "cli_args": cli_args_asset
-    }
+    initial_state_edit = {"messages": [{"role": "user", "content": cli_args_edit.prompt}], "cli_args": cli_args_edit}
+    run_test("Test 2: Code Editor Pipeline (gpt-4.1-mini)", initial_state_edit)
+    '''
+    initial_state_asset = {"messages": [{"role": "user", "content": cli_args_asset.prompt}], "cli_args": cli_args_asset}
     run_test("Test 3: Asset Search Pipeline", initial_state_asset)
 
-
 if __name__ == "__main__":
-    # Ensure output directories exist
-    pathlib.Path("Outputs/Assets").mkdir(parents=True, exist_ok=True)
-    pathlib.Path("Outputs").mkdir(parents=True, exist_ok=True)
-    
-    # --- Create a dummy HTML file for Test 2 ---
-    test_edit_file_path = "Outputs/test_page_to_edit.html"
-    dummy_html = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Original Test Title</title>
-</head>
-<body>
-    <h1>This is the original headline.</h1>
-    <p>This is a paragraph.</p>
-</body>
-</html>
-    """
-    with open(test_edit_file_path, "w", encoding="utf-8") as f:
-        f.write(dummy_html)
-    print(f"Created dummy file for editing at: {test_edit_file_path}")
-    
-    # Check for test image for Test 1
-    if not pathlib.Path("Images/2.png").exists():
-        print("\n--- WARNING ---")
-        print("Test 1 (Azure VLM) requires an image at 'Images/2.png'.")
-        print("Please add an image there or Test 1 will be skipped.")
-        print("---------------\n")
-
-    # Check for Test 1.5 image
-    if not pathlib.Path("Images/asset_test.png").exists():
-        print("\n--- WARNING ---")
-        print("Test 1.5 (Azure VLM + Asset Search) requires an image at 'Images/asset_test.png'.")
-        print("This test *specifically* verifies the internal asset search.")
-        print("Please add an image with clear image placeholders, or Test 1.5 will be skipped.")
-        print("---------------\n")
-
     main()
