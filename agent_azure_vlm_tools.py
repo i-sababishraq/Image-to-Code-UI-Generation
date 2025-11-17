@@ -126,7 +126,7 @@ class ModelManager:
         """Use GPT (Azure) to handle vision+language style messages. 'messages' should be in the Azure chat format."""
         return self.chat_complete_azure(deployment or self.default_deployment, messages, temperature, max_new_tokens)
 
-    def chat_llm(self, prompt: str, temperature: float = 0.1, max_tokens: int = 1024, deployment: Optional[str] = None):
+    def chat_llm(self, prompt: str, temperature: float = 0.1, max_tokens: int = 2048, deployment: Optional[str] = None):
         """Use GPT to handle plain text prompts: converts prompt to a single-user message."""
         messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
         return self.chat_vlm(messages, temperature=temperature, max_new_tokens=max_tokens, deployment=deployment)
@@ -636,6 +636,10 @@ class CodeRefineState:
 
     messages: List[str] = field(default_factory=list)
 
+    best_html: Optional[str] = None
+    best_score: float = -1.0  # Use -1.0 to ensure the first score is always higher
+    best_html_path: Optional[str] = None
+
 def parse_text_report(report: str) -> Dict[str, Any]:
     sb = _section(report, "SCORES")
     scores = {k: _score_val(sb, k, 0) for k in _SCORE_KEYS}
@@ -749,6 +753,7 @@ def node_stage1(state: CodeRefineState) -> CodeRefineState:
     return state
 
 def node_stage2(state: CodeRefineState) -> CodeRefineState:
+    print("--- NODE: generating HTML... ---")
     # Convert asset_paths dict to a JSON string for the prompt
     asset_paths_json = json.dumps(state.asset_paths, indent=2)
 
@@ -848,6 +853,7 @@ def node_save_html_pre_score(state: CodeRefineState) -> CodeRefineState:
         return state
 
 def node_stage3_score(state: CodeRefineState) -> CodeRefineState:
+    print("--- NODE: scoring... ---")
     html_path = pathlib.Path(state.out_html)
     shot_png_path = html_path.with_name(html_path.stem + f"_iter{state.current_iteration}.png")
     with sync_playwright() as p:
@@ -871,18 +877,57 @@ def node_stage3_score(state: CodeRefineState) -> CodeRefineState:
         ]},
     ]
     resp = models.chat_complete_azure(state.vision_deployment, messages, 0.0, state.judge_tokens)
-    state.scores = parse_text_report(resp)
+    # 1. Parse the report for the *current* HTML
+    current_scores = parse_text_report(resp)
+    new_aggregate_score = current_scores.get("aggregate", 0.0)
+    
+    print(f"Iteration {state.current_iteration} score: {new_aggregate_score}. Best score: {state.best_score}")
+
+    # 2. Compare the new score to the stored best score
+    if new_aggregate_score > state.best_score:
+        # It's better! Update the best values.
+        print(f"-> New best score: {new_aggregate_score} (improved from {state.best_score})")
+        state.best_score = new_aggregate_score
+        state.best_html = state.html
+        state.best_html_path = state.out_html
+    
+    else:
+        # It's worse or the same. Revert the state's HTML to the best version.
+        print(f"-> Score did not improve ({new_aggregate_score} vs {state.best_score}). Reverting to best HTML.")
+        state.html = state.best_html
+        state.out_html = state.best_html_path
+
+    # 3. Store the scores of the (just-evaluated) HTML for logging/threshold check
+    state.scores = current_scores
+
     state.messages.append(f"Stage3: Scoring done (Iter {state.current_iteration}).")
 
-    min_score = min(int(state.scores["scores"][k]) for k in _SCORE_KEYS)
-    if min_score >= state.refine_threshold:
+    # 4. Check for stopping
+    # We can stop if the *best* score has met the threshold, even if this last try was bad
+    if state.best_score >= state.refine_threshold:
+        print(f"Best score {state.best_score} meets threshold {state.refine_threshold}. Stopping.")
         state.stop_refinement = True
+    else:
+        # Also check if the *current* score is good enough
+        min_score = min(int(state.scores["scores"][k]) for k in _SCORE_KEYS)
+        if min_score >= state.refine_threshold:
+            print(f"Current score (min {min_score}) meets threshold {state.refine_threshold}. Stopping.")
+            state.stop_refinement = True
+            
     return state
 
 def node_refine_loop(state: CodeRefineState) -> CodeRefineState:
+    print("--- NODE: Refinement loop ---")
     if state.stop_refinement or state.current_iteration >= state.refine_max_iters:
         state.messages.append("Refinement loop ended.")
+
+        if state.html != state.best_html:
+            print("Finalizing state to best version.")
+            state.html = state.best_html
+            state.out_html = state.best_html_path
+
         return state
+    
     state.current_iteration += 1
 
     state.html = refine_with_feedback(
@@ -900,8 +945,10 @@ def node_refine_loop(state: CodeRefineState) -> CodeRefineState:
     #if state.asset_paths:
     #    state.messages.append(f"Re-patching assets for iteration {state.current_iteration}...")
     #    state.html, state.messages = _patch_html(state.html, state.asset_paths, state.messages)
+    base_path = pathlib.Path(state.best_html_path)
+    versioned_path = base_path.with_name(base_path.stem.split('_v')[0] + f"_v{state.current_iteration}" + base_path.suffix)
+    #versioned_path = pathlib.Path(state.out_html).with_name(pathlib.Path(state.out_html).stem + f"_v{state.current_iteration}" + pathlib.Path(state.out_html).suffix)
 
-    versioned_path = pathlib.Path(state.out_html).with_name(pathlib.Path(state.out_html).stem + f"_v{state.current_iteration}" + pathlib.Path(state.out_html).suffix)
     with open(versioned_path, "w", encoding="utf-8") as f: f.write(state.html)
     state.out_html = str(versioned_path)
     state.messages.append(f"Saved refined HTML v{state.current_iteration} -> {versioned_path}")
@@ -926,12 +973,9 @@ def build_azure_vlm_graph():
     workflow.add_node("stage0", node_stage0)
     workflow.add_node("stage1", node_stage1)
     
-    # New node for planning from brief
     workflow.add_node("plan_assets_from_brief", node_plan_assets_from_brief)
     workflow.add_node("stage1_find_assets", node_stage1_find_assets)
     workflow.add_node("stage2", node_stage2)
-    
-    # Removed: plan_assets_from_html, patch_html
     
     workflow.add_node("save_html_pre_score", node_save_html_pre_score)
     workflow.add_node("stage3_score", node_stage3_score)
@@ -940,7 +984,6 @@ def build_azure_vlm_graph():
     workflow.set_entry_point("stage0")
     workflow.add_edge("stage0", "stage1")
 
-    # NEW routing logic after brief (stage1)
     workflow.add_conditional_edges(
         "stage1",
         route_after_brief, # NEW router function
@@ -1009,7 +1052,7 @@ def helper_run_azure_vlm_pipeline(
             # Hardcoded values remain for now
             reldesc_tokens=700,
             brief_tokens=1100,
-            code_tokens=2200,
+            code_tokens=8192,
             judge_tokens=900,
             temp=0.12,
             shot_width=1536,
