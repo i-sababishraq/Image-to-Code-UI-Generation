@@ -311,8 +311,6 @@ def asset_generate_image_node(state: AssetGraphState) -> dict:
 
     print(f"Generating asset with prompt: '{prompt}'")
     
-    # NOTE: This is where you would swap the placeholder with your 
-    # call to a real image gen API (e.g., Google GenAI, Nano Banana)
     generated_image = models.generate_image(prompt, width=width, height=height)
     
     output_dir = pathlib.Path("Outputs/Assets")
@@ -320,9 +318,17 @@ def asset_generate_image_node(state: AssetGraphState) -> dict:
     filename = f"generated_{uuid4()}.png"
     full_save_path = output_dir / filename
     generated_image.save(full_save_path)
-    print(f"Image generated and saved to {full_save_path}")
-    html_path = pathlib.Path("Assets") / filename
-    final_asset_path = str(html_path.as_posix())
+
+    # 1. Get the full, absolute path (e.g., C:\Users\YourUser\Project\...)
+    absolute_path = full_save_path.resolve()
+    
+    # 2. Convert the absolute path to a file URI (e.g., file:///C:/Users/...)
+    # This is what browsers need to render local files.
+    final_asset_path = absolute_path.as_uri()
+    
+    print(f"Image generated and saved to {absolute_path}")
+    print(f"-> Using absolute URI for HTML: {final_asset_path}")
+    
     return {"final_asset_path": final_asset_path}
 
 def build_asset_graph():
@@ -614,7 +620,7 @@ Output ONLY valid HTML starting with <html> and ending with </html>.
 
 PLAN_ASSETS_SYSTEM = "You are an expert UI analyst. You extract asset requirements from a brief."
 PLAN_ASSETS_PROMPT = """
-Read the following UI DESIGN BRIEF. Your task is to identify the major image assets required to build the page. MAX 10 assets.
+Read the following UI DESIGN BRIEF. Your task is to identify the major image assets required to build the page. MAX 5 assets.
 
 For each image asset, you MUST specify a unique `component_id` (e.g., "hero-image", "card-icon-1")
 and a `description` (a detailed prompt for an image search/generator).
@@ -716,7 +722,7 @@ def refine_with_feedback(
     html_edits: str = "",
     regenerate_prompt: str = "",
     temperature: float = 0.12,
-    max_tokens: int = 2200,
+    max_tokens: int = 8912,
 ) -> str:
     """
     Applies feedback (and optional CSS/HTML patches) to refine the HTML layout using GPT.
@@ -819,6 +825,35 @@ def node_stage2(state: CodeRefineState) -> CodeRefineState:
         state.messages.append("Stage2: Generated HTML (with placeholders).")
         
     return state
+
+def node_decide_asset_gen(state: CodeRefineState) -> dict:
+    """
+    Uses an LLM to read the UI Brief and decide if assets are needed.
+    This replaces the manual --find_assets flag.
+    """
+    print("---(Azure VLM) NODE: Deciding if assets are needed---")
+    if not state.brief:
+        state.messages.append("Warning: No brief found. Skipping asset generation.")
+        return {"find_assets": False}
+    
+    prompt = f"""
+    Here is a UI Design Brief:
+    ---
+    {state.brief}
+    ---
+    Based *only* on this brief, does this UI design require image assets (like photos, icons, logos) to be generated or found?
+    Answer with a single, unadorned word: YES or NO.
+    """
+    
+    # Use the cheap, fast text model for this simple decision
+    response = models.chat_llm(prompt, temperature=0.0)
+    
+    if response.strip().upper() == "YES":
+        print("-> AI Decision: YES, assets are required.")
+        return {"find_assets": True}
+    else:
+        print("-> AI Decision: NO, assets are not required.")
+        return {"find_assets": False}
 
 def node_plan_assets_from_brief(state: CodeRefineState) -> CodeRefineState:
     print("---(Azure VLM) NODE: Planning assets from BRIEF---")
@@ -999,52 +1034,56 @@ def decide_next(state: CodeRefineState) -> str:
         return "refine_loop"
     return "end"
 
-def route_after_brief(state: CodeRefineState) -> str:
+def route_after_decision(state: CodeRefineState) -> str:
+    """
+    Checks the 'find_assets' boolean (now set by the AI) 
+    and routes to the correct next step.
+    """
     if state.find_assets:
-        print("-> Configured to find assets. Proceeding to plan from BRIEF.")
+        print("-> Routing: Planning assets.")
         return "plan_assets"
     else:
-        print("-> Configured to skip asset search. Proceeding to code gen.")
-        state.asset_paths = {} # Ensure it's empty for stage2
+        print("-> Routing: Skipping assets, generating code.")
         return "generate_code"
 
 def build_azure_vlm_graph():
     workflow = StateGraph(CodeRefineState)
+    
+    # 1. Add all nodes
     workflow.add_node("stage0", node_stage0)
     workflow.add_node("stage1", node_stage1)
-    
+    workflow.add_node("decide_assets", node_decide_asset_gen) # NEW
     workflow.add_node("plan_assets_from_brief", node_plan_assets_from_brief)
     workflow.add_node("stage1_find_assets", node_stage1_find_assets)
     workflow.add_node("stage2", node_stage2)
-    
     workflow.add_node("save_html_pre_score", node_save_html_pre_score)
     workflow.add_node("stage3_score", node_stage3_score)
     workflow.add_node("refine_loop", node_refine_loop)
     
+    # 2. Define graph flow
     workflow.set_entry_point("stage0")
     workflow.add_edge("stage0", "stage1")
-
+    
+    # NEW FLOW: stage1 -> decide_assets -> (conditional split)
+    workflow.add_edge("stage1", "decide_assets")
     workflow.add_conditional_edges(
-        "stage1",
-        route_after_brief, # NEW router function
+        "decide_assets",
+        route_after_decision, # Use the new router
         {
             "plan_assets": "plan_assets_from_brief",
-            "generate_code": "stage2" # Skip to code gen if not finding assets
+            "generate_code": "stage2" 
         }
     )
     
-    # Asset pipeline: Plan -> Find -> CodeGen
+    # Asset pipeline branch
     workflow.add_edge("plan_assets_from_brief", "stage1_find_assets")
     workflow.add_edge("stage1_find_assets", "stage2")
 
-    # NEW: stage2 (code gen) now goes directly to saving/scoring
+    # Both branches meet here (or "generate_code" skips to here)
     workflow.add_edge("stage2", "save_html_pre_score")
-
-    # OLD 'else' branch from removed router
+    
+    # Refinement loop
     workflow.add_edge("save_html_pre_score", "stage3_score")
-
-    # Refine loop (unchanged): Score -> Refine -> (loops to Score)
-    # This loop still uses _patch_html internally, which is correct
     workflow.add_edge("stage3_score", "refine_loop")
     workflow.add_conditional_edges("refine_loop", decide_next, {"refine_loop": "stage3_score", "end": END})
 
@@ -1066,7 +1105,6 @@ class BrainState(TypedDict):
 
 def helper_run_azure_vlm_pipeline(
     image_path: str, 
-    find_assets: bool,
     out_html_path: str, 
     out_brief_path: str, 
     out_reldesc_path: str,
@@ -1075,7 +1113,7 @@ def helper_run_azure_vlm_pipeline(
     refine_max_iters: int,
     refine_threshold: int
 ) -> str:
-    print(f"--- BRAIN: Invoking Azure VLM Pipeline for {image_path} (Find Assets: {find_assets}) ---")
+    print(f"--- BRAIN: Invoking Azure VLM Pipeline for {image_path} ---")
     try:
         pathlib.Path(out_html_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -1086,7 +1124,6 @@ def helper_run_azure_vlm_pipeline(
             out_html=out_html_path,
             vision_deployment=vision_deployment,
             text_deployment=text_deployment,
-            find_assets=find_assets,
             refine_max_iters=refine_max_iters,
             refine_threshold=refine_threshold,
             # Hardcoded values remain for now
@@ -1251,7 +1288,6 @@ Now output the JSON object only:
                 return {"next_task": "end", "task_result": "No operation selected."}
 
             if func_name == "helper_run_azure_vlm_pipeline":
-                func_args['find_assets'] = cli_args.find_assets
                 func_args['image_path'] = cli_args.image
                 func_args['out_html_path'] = cli_args.out_html
                 func_args['out_brief_path'] = cli_args.out_brief
@@ -1404,11 +1440,6 @@ def main():
     )
 
     # VLM Pipeline options
-    parser.add_argument(
-        "--find_assets", 
-        action="store_true", 
-        help="Enable the asset search/generation pipeline."
-    )
     parser.add_argument(
         "--vision_deployment", 
         type=str, 
