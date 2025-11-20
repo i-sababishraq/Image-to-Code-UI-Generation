@@ -1,0 +1,134 @@
+{
+  "sha": "cdea2c3cd3453bae2fd75c742086118e167e6cf2",
+  "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/trees/cdea2c3cd3453bae2fd75c742086118e167e6cf2",
+  "tree": [
+    {
+      "path": ".env",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "cd79c6e85e1ca9ba61e82f6f0b5e362b0fd001e3",
+      "size": 362,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/cd79c6e85e1ca9ba61e82f6f0b5e362b0fd001e3"
+    },
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "62d49e99dd019ff39c97fbea162a0a42a4d83963",
+      "size": 216,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/62d49e99dd019ff39c97fbea162a0a42a4d83963"
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6398057684adb91259d220c7f1363633e5fddac0",
+      "size": 565,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/6398057684adb91259d220c7f1363633e5fddac0"
+    },
+    {
+      "path": "agent.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "829e77331c5fff3980f1d9c395a55f28df623733",
+      "size": 3236,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/829e77331c5fff3980f1d9c395a55f28df623733"
+    },
+    {
+      "path": "agent_azure_vlm.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b965705db9fae1de2d290513dd0f9e94ac13a8ab",
+      "size": 22805,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/b965705db9fae1de2d290513dd0f9e94ac13a8ab"
+    },
+    {
+      "path": "agent_azure_vlm_tools.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "78c9f91c27bb4b33158025824d8c6aadc3dd686f",
+      "size": 60657,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/78c9f91c27bb4b33158025824d8c6aadc3dd686f"
+    },
+    {
+      "path": "asset_agent.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6d0f880df5dc2a564784e5e2a7481257b585878e",
+      "size": 9477,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/6d0f880df5dc2a564784e5e2a7481257b585878e"
+    },
+    {
+      "path": "assets",
+      "mode": "040000",
+      "type": "tree",
+      "sha": "6b3c587f5835548b31b3236deebbdb63106833ef",
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/trees/6b3c587f5835548b31b3236deebbdb63106833ef"
+    },
+    {
+      "path": "assets/bird-colorful-logo-gradient-vector_343694-1365.jpg",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bf1163a2b0cf032d15ab43b66302d6d5a8911173",
+      "size": 9111,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/bf1163a2b0cf032d15ab43b66302d6d5a8911173"
+    },
+    {
+      "path": "constants.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "b0edeb60ee835c4eefa2ed79b7b87a740a76ed76",
+      "size": 74,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/b0edeb60ee835c4eefa2ed79b7b87a740a76ed76"
+    },
+    {
+      "path": "dataloader.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "04d4b2ae145ac1dc54cf122adca7eed6a2980a5a",
+      "size": 6542,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/04d4b2ae145ac1dc54cf122adca7eed6a2980a5a"
+    },
+    {
+      "path": "dataloader_hf.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "9bc6dbc64a31737d3372407e50f281894e0a000f",
+      "size": 1160,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/9bc6dbc64a31737d3372407e50f281894e0a000f"
+    },
+    {
+      "path": "fix_eval_image_paths.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a5ff43d4323ede089ce3732d6b777fafb39e5b8b",
+      "size": 2062,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/a5ff43d4323ede089ce3732d6b777fafb39e5b8b"
+    },
+    {
+      "path": "nodes.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d9909b817f72b0df473837c090e791b2ad05b3f8",
+      "size": 5167,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/d9909b817f72b0df473837c090e791b2ad05b3f8"
+    },
+    {
+      "path": "requirements.txt",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bcb4fe001245a8b8c673f9676c86d375d72d925a",
+      "size": 1437,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/bcb4fe001245a8b8c673f9676c86d375d72d925a"
+    },
+    {
+      "path": "utils.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "28576928f8452c668693899c3a37bd27566ea947",
+      "size": 4577,
+      "url": "https://api.github.com/repos/TTrumpet/Image-to-Code-UI-Generation/git/blobs/28576928f8452c668693899c3a37bd27566ea947"
+    }
+  ],
+  "truncated": false
+}
