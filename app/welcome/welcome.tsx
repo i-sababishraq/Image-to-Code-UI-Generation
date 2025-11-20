@@ -39,6 +39,8 @@ type Message = {
   timestamp: string;
   renderAsCode?: boolean;
   codeLanguage?: string;
+  htmlPath?: string;
+  htmlWebPath?: string | null;
 };
 
 type HistoryEntry = {
@@ -56,6 +58,9 @@ type RenderedComponentPreview = {
   title: string;
   html: string;
   createdAt: Date;
+  previewUrl?: string | null;
+  htmlPath?: string;
+  htmlWebPath?: string | null;
 };
 
 type WireframePreview = {
@@ -184,6 +189,14 @@ const serializeMessageForHistory = (message: Message): StoredChatMessage => {
     serialized.codeLanguage = message.codeLanguage;
   }
 
+  if (message.htmlPath) {
+    serialized.htmlPath = message.htmlPath;
+  }
+
+  if (message.htmlWebPath) {
+    serialized.htmlWebPath = message.htmlWebPath;
+  }
+
   return serialized;
 };
 
@@ -306,6 +319,21 @@ const mapAgentPayloadToMessages = (
       .filter((snippet) => snippet.length > 0);
     const combinedCode = codeContentCandidates.join("\n\n").trim();
     const codeLanguage = detectCodeLanguage(combinedCode);
+    const htmlSourceWithPath = codeSources.find(
+      (message) => message.htmlPath || message.htmlWebPath,
+    );
+    const previewSource = agentMessages.find(
+      (message) => Array.isArray(message.attachments) && message.attachments.length > 0,
+    );
+    const previewAttachments: ChatAttachment[] | undefined = previewSource?.attachments
+      ? previewSource.attachments.map((attachment) => ({
+          id: attachment.id,
+          name: attachment.name,
+          type: attachment.type,
+          previewUrl: attachment.previewUrl,
+          size: attachment.size,
+        }))
+      : undefined;
 
     const codeMessage: Message = {
       id: createMessageId(),
@@ -318,6 +346,9 @@ const mapAgentPayloadToMessages = (
       timestamp,
       renderAsCode: true,
       codeLanguage,
+      htmlPath: htmlSourceWithPath?.htmlPath,
+      htmlWebPath: htmlSourceWithPath?.htmlWebPath,
+      attachments: previewAttachments,
     };
 
     return [
@@ -359,6 +390,18 @@ const createInstructionFallbackMessage = (): Message => ({
   timestamp: formatTimestamp(new Date()),
 });
 
+const summarizeAgentLog = (log: string, maxItems = 4): string => {
+  const segments = log
+    .split(/(?=Stage|Asset resolved|HTML saved|Best score|Error|->)/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  if (segments.length === 0) {
+    return log.length > 400 ? `${log.slice(0, 400)}…` : log;
+  }
+  const highlights = segments.slice(0, maxItems).map((item) => `• ${item.replace(/\s+/g, " ")}`);
+  return ["Agent summary:", ...highlights].join("\n");
+};
+
 const buildPromptHistoryPayload = (
   userMessage: Message,
   assistantMessages: Message[],
@@ -384,6 +427,9 @@ const mapEntryToRenderedComponent = (
     title: entry.title,
     html: codeMessage.content,
     createdAt: entry.createdAt,
+    previewUrl: codeMessage.htmlWebPath ?? null,
+    htmlPath: codeMessage.htmlPath,
+    htmlWebPath: codeMessage.htmlWebPath ?? null,
   };
 };
 
@@ -431,6 +477,8 @@ type AgentChatMessagePayload = {
   variant: "accent" | "subtle";
   content: string;
   attachments?: ChatAttachment[];
+  htmlPath?: string;
+  htmlWebPath?: string | null;
 };
 
 type AgentRunResponse = {
@@ -441,6 +489,8 @@ type AgentRunResponse = {
     detail?: string;
   };
   usedFallback?: boolean;
+  finalHtmlPath?: string;
+  finalHtmlWebPath?: string | null;
 };
 
 const VLM_AGENT_ENDPOINT = "/api/vlm";
@@ -474,7 +524,7 @@ const FALLBACK_INSTRUCTIONS = [
   "• Use the Preview and History tabs to inspect generated code or revisit prior explorations.",
 ].join("\n");
 
-const AGENT_REQUEST_TIMEOUT_MS = 240_000; 
+const AGENT_REQUEST_TIMEOUT_MS = 3_600_000; // 6 minutes
 
 export function Welcome() {
   const { user, loading, signOut } = useAuth();
@@ -501,6 +551,7 @@ export function Welcome() {
   const livePreviewRef = useRef<RenderedComponentPreview | null>(null);
   const [pendingWireframes, setPendingWireframes] = useState<WireframePreview[]>([]);
   const [submittedWireframes, setSubmittedWireframes] = useState<WireframePreview[]>([]);
+  const [lastSubmittedFiles, setLastSubmittedFiles] = useState<File[]>([]);
   const onboardingRequestedRef = useRef(false);
   const [pexelsQuery, setPexelsQuery] = useState("");
   const [pexelsResult, setPexelsResult] = useState<PexelsImageResult | null>(null);
@@ -817,10 +868,12 @@ export function Welcome() {
       return;
     }
 
-    if (selectedFiles.length === 0) {
+    const filesToSend = selectedFiles.length > 0 ? selectedFiles : lastSubmittedFiles;
+
+    if (filesToSend.length === 0) {
       setStatus({
         kind: "error",
-        text: "Attach at least one wireframe image before sending.",
+        text: "Upload a wireframe before sending your first request.",
       });
       return;
     }
@@ -841,7 +894,7 @@ export function Welcome() {
 
     try {
       const createdUrls: string[] = [];
-      const attachments: ChatAttachment[] = selectedFiles.map((file) => {
+      const attachments: ChatAttachment[] = filesToSend.map((file) => {
         const isImage = file.type.startsWith("image/");
         let previewUrl: string | undefined;
 
@@ -863,7 +916,8 @@ export function Welcome() {
         registerObjectUrls(createdUrls);
       }
 
-      persistSubmittedWireframes(selectedFiles);
+      persistSubmittedWireframes(filesToSend);
+      setLastSubmittedFiles([...filesToSend]);
 
       const messageContent =
         textContent || (attachments.length > 0 ? "Shared design attachments" : "");
@@ -880,7 +934,7 @@ export function Welcome() {
 
       const requestPayload = new FormData();
       requestPayload.append("prompt", textContent);
-      selectedFiles.forEach((file) => {
+      filesToSend.forEach((file) => {
         requestPayload.append("images", file);
       });
 
@@ -907,6 +961,14 @@ export function Welcome() {
 
         const assistantMessages = mapAgentPayloadToMessages(agentResponse?.messages, {
           mode: "friendly-code",
+        }).map((message) => {
+          if (message.variant === "subtle" && message.content.length > 400) {
+            return {
+              ...message,
+              content: summarizeAgentLog(message.content, 4),
+            };
+          }
+          return message;
         });
         const thinkingSteps = extractThinkingSteps(agentResponse?.messages);
         if (thinkingSteps.length > 0) {
@@ -922,18 +984,22 @@ export function Welcome() {
 
         const codeMessage = assistantMessages.find((message) => message.renderAsCode);
         if (codeMessage) {
+          const previewUrl = agentResponse?.finalHtmlWebPath ?? codeMessage.htmlWebPath ?? null;
           const component: RenderedComponentPreview = {
             id: `live-${codeMessage.id}`,
             title: createHistoryTitle(userMessage.content),
             html: codeMessage.content,
             createdAt: new Date(),
+            previewUrl,
+            htmlPath: agentResponse?.finalHtmlPath ?? codeMessage.htmlPath,
+            htmlWebPath: previewUrl,
           };
           livePreviewRef.current = component;
           setRenderedComponents((previous) => [component, ...previous]);
         }
 
         if (assistantMessages.length > 0 && user) {
-          const payload = buildPromptHistoryPayload(userMessage, assistantMessages, selectedFiles);
+          const payload = buildPromptHistoryPayload(userMessage, assistantMessages, filesToSend);
           void (async () => {
             try {
               await savePromptHistory(user.uid, createMessageId(), payload);
@@ -1064,7 +1130,17 @@ export function Welcome() {
       }
 
       if (updated.length === 0) {
-        setStatus(null);
+        if (lastSubmittedFiles.length > 0) {
+          setStatus({
+            kind: "success",
+            text: "No new attachments selected. We'll reuse your latest wireframes.",
+          });
+        } else {
+          setStatus({
+            kind: "error",
+            text: "You removed all attachments. Add at least one wireframe before sending.",
+          });
+        }
       }
 
       return updated;
@@ -1186,6 +1262,7 @@ export function Welcome() {
             isBootstrappingAssistant={isBootstrappingAssistant}
             wireframePreviews={inspirationPreviews}
             hasPendingWireframes={showingPendingWireframes}
+            hasStoredWireframes={lastSubmittedFiles.length > 0}
             pexelsQuery={pexelsQuery}
             onPexelsQueryChange={handlePexelsQueryChange}
             onPexelsSearch={runPexelsSearch}
@@ -1317,6 +1394,7 @@ type ChatPanelProps = {
   isBootstrappingAssistant: boolean;
   wireframePreviews: WireframePreview[];
   hasPendingWireframes: boolean;
+  hasStoredWireframes: boolean;
   pexelsQuery: string;
   onPexelsQueryChange: (value: string) => void;
   onPexelsSearch: () => void;
@@ -1341,6 +1419,7 @@ function ChatPanel({
   isBootstrappingAssistant,
   wireframePreviews,
   hasPendingWireframes,
+  hasStoredWireframes,
   pexelsQuery,
   onPexelsQueryChange,
   onPexelsSearch,
@@ -1424,6 +1503,11 @@ function ChatPanel({
                 ))}
               </ul>
             )}
+            {selectedFiles.length === 0 && hasStoredWireframes && (
+              <p className="text-xs text-slate-500">
+                Using wireframes from your previous run.
+              </p>
+            )}
           </div>
 
           <input
@@ -1448,7 +1532,10 @@ function ChatPanel({
             </button>
             <button
               type="submit"
-              disabled={isSending || (promptValue.trim().length === 0 && selectedFiles.length === 0)}
+              disabled={
+                isSending ||
+                (promptValue.trim().length === 0 && selectedFiles.length === 0 && !hasStoredWireframes)
+              }
               className="flex items-center gap-2 rounded-xl bg-[#2F6BFF] px-4 py-2 text-sm font-semibold text-white shadow-[0_14px_32px_-18px_rgba(47,107,255,0.9)] transition hover:bg-[#2A5FE6] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2F6BFF] disabled:cursor-not-allowed disabled:bg-[#2F6BFF]/60"
             >
               {isSending ? "Sending..." : "Send"}
@@ -1459,6 +1546,16 @@ function ChatPanel({
             </button>
           </div>
         </form>
+        {isSending && (
+          <p
+            role="status"
+            aria-live="polite"
+            className="mx-4 mb-4 flex items-center gap-3 rounded-2xl border border-slate-800/60 bg-slate-900/70 px-4 py-3 text-xs font-medium text-slate-300 animate-pulse"
+          >
+            <span className="inline-flex h-2 w-2 animate-ping rounded-full bg-[#2F6BFF]" />
+            Agent is still running. Bigger generations can take a minute—keep this tab open while we finish.
+          </p>
+        )}
       </div>
     </section>
   );
@@ -1669,19 +1766,28 @@ function PreviewPanel({ components }: PreviewPanelProps) {
               </div>
               <button
                 type="button"
-                onClick={() => openComponentInNewTab(component.html)}
+                onClick={() => openComponentInNewTab(component)}
                 className="rounded-full border border-slate-700 px-4 py-1.5 text-xs font-semibold text-slate-200 transition hover:border-[#2F6BFF]/50 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2F6BFF]"
               >
                 Open full view
               </button>
             </div>
             <div className="relative overflow-hidden rounded-2xl border border-slate-800 bg-slate-950">
-              <iframe
-                title={`Preview for ${component.title}`}
-                srcDoc={component.html}
-                sandbox="allow-scripts allow-same-origin allow-forms"
-                className="h-[420px] w-full"
-              />
+              {component.previewUrl ? (
+                <iframe
+                  title={`Preview for ${component.title}`}
+                  src={component.previewUrl}
+                  sandbox="allow-scripts allow-same-origin allow-forms"
+                  className="h-[420px] w-full"
+                />
+              ) : (
+                <iframe
+                  title={`Preview for ${component.title}`}
+                  srcDoc={component.html}
+                  sandbox="allow-scripts allow-same-origin allow-forms"
+                  className="h-[420px] w-full"
+                />
+              )}
             </div>
           </article>
         ))}
@@ -1887,8 +1993,13 @@ function ThinkingPanel({ entries, isExpanded, onToggle }: ThinkingPanelProps) {
   );
 }
 
-function openComponentInNewTab(html: string) {
-  const blob = new Blob([html], { type: "text/html" });
+function openComponentInNewTab(component: RenderedComponentPreview) {
+  const resolvedUrl = resolvePreviewUrl(component);
+  if (resolvedUrl) {
+    window.open(resolvedUrl, "_blank", "noopener,noreferrer");
+    return;
+  }
+  const blob = new Blob([component.html], { type: "text/html" });
   const url = URL.createObjectURL(blob);
   window.open(url, "_blank", "noopener,noreferrer");
   setTimeout(() => URL.revokeObjectURL(url), 2000);
@@ -1936,37 +2047,14 @@ function MessageBubble({ message }: MessageBubbleProps) {
           </span>
           <div className={`${bubbleBase} ${bubbleTone}`}>
             {isCode ? (
-              <CodePreview content={message.content} language={message.codeLanguage} />
+              <>
+                <CodePreview content={message.content} language={message.codeLanguage} />
+                <AttachmentGallery attachments={message.attachments} />
+              </>
             ) : (
               <>
                 <p className="whitespace-pre-wrap">{message.content}</p>
-                {message.attachments && message.attachments.length > 0 && (
-                  <ul className="mt-4 flex flex-wrap gap-3 text-sm font-medium">
-                    {message.attachments.map((attachment) => (
-                      <li key={attachment.id}>
-                        {attachment.type === "image" && attachment.previewUrl ? (
-                          <figure className="group relative flex h-28 w-32 overflow-hidden rounded-xl border border-slate-800/80 bg-slate-900/60">
-                            <img
-                              src={attachment.previewUrl}
-                              alt={attachment.name}
-                              className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]"
-                            />
-                            <figcaption className="absolute bottom-0 w-full bg-slate-950/80 px-2 py-1 text-[11px] font-medium text-slate-200 backdrop-blur">
-                              {attachment.name}
-                            </figcaption>
-                          </figure>
-                        ) : (
-                          <div className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2 text-[13px] text-slate-200">
-                            <FileGlyph />
-                            <span className="max-w-[140px] truncate" title={attachment.name}>
-                              {attachment.name}
-                            </span>
-                          </div>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                <AttachmentGallery attachments={message.attachments} />
               </>
             )}
           </div>
@@ -1974,6 +2062,68 @@ function MessageBubble({ message }: MessageBubbleProps) {
       </div>
     </li>
   );
+}
+
+function AttachmentGallery({ attachments }: { attachments?: ChatAttachment[] }) {
+  if (!attachments || attachments.length === 0) {
+    return null;
+  }
+
+  return (
+    <ul className="mt-4 flex flex-wrap gap-3 text-sm font-medium">
+      {attachments.map((attachment) => (
+        <li key={attachment.id}>
+          {attachment.type === "image" && attachment.previewUrl ? (
+            <figure className="group relative flex h-28 w-32 overflow-hidden rounded-xl border border-slate-800/80 bg-slate-900/60">
+              <img
+                src={attachment.previewUrl}
+                alt={attachment.name}
+                className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]"
+              />
+              <figcaption className="absolute bottom-0 w-full bg-slate-950/80 px-2 py-1 text-[11px] font-medium text-slate-200 backdrop-blur">
+                {attachment.name}
+              </figcaption>
+            </figure>
+          ) : (
+            <div className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2 text-[13px] text-slate-200">
+              <FileGlyph />
+              <span className="max-w-[140px] truncate" title={attachment.name}>
+                {attachment.name}
+              </span>
+            </div>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function resolvePreviewUrl(component: RenderedComponentPreview): string | null {
+  const candidate =
+    component.previewUrl ?? component.htmlWebPath ?? deriveWebPathFromFile(component.htmlPath);
+
+  if (!candidate) {
+    return null;
+  }
+
+  try {
+    return new URL(candidate, window.location.origin).toString();
+  } catch {
+    return null;
+  }
+}
+
+function deriveWebPathFromFile(filePath?: string | null): string | null {
+  if (!filePath) {
+    return null;
+  }
+  const normalized = filePath.replace(/\\/g, "/");
+  const marker = "/Image-to-Code-UI-Generation/";
+  const markerIndex = normalized.indexOf(marker);
+  if (markerIndex === -1) {
+    return null;
+  }
+  return normalized.slice(markerIndex);
 }
 
 function CodePreview({ content, language }: { content: string; language?: string }) {

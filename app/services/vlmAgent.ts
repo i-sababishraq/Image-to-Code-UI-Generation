@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
 
-const PYTHON_TIMEOUT_MS = 180_000;
+const PYTHON_TIMEOUT_MS = 3_000_000; // 5 minutes
 const PYTHON_SCRIPT = "run_agent_once.py";
 
 type AgentAttachment = {
@@ -29,6 +29,8 @@ type PythonAgentSuccess = {
       dataUrl: string;
       size?: number;
     };
+    final_html_path?: string;
+    final_html_web_path?: string | null;
   };
   logs?: string;
 };
@@ -47,6 +49,8 @@ export type AgentChatMessage = {
   variant: "accent" | "subtle";
   content: string;
   attachments?: AgentAttachment[];
+  htmlPath?: string;
+  htmlWebPath?: string | null;
 };
 
 export type AgentRunResult = {
@@ -57,6 +61,8 @@ export type AgentRunResult = {
     detail?: string;
   };
   usedFallback: boolean;
+  finalHtmlPath?: string;
+  finalHtmlWebPath?: string | null;
 };
 
 const serviceDir = fileURLToPath(new URL(".", import.meta.url));
@@ -80,9 +86,15 @@ async function runPythonProcess(prompt: string, imagePath?: string): Promise<Pyt
 
     let subprocess: ChildProcessWithoutNullStreams;
     try {
+      const env = {
+        ...process.env,
+        PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1",
+      };
       subprocess = spawn(pythonExecutable, [pythonScriptPath], {
         cwd: pythonWorkingDir,
         stdio: "pipe",
+        env,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown spawn error";
@@ -188,6 +200,8 @@ function buildMessagesFromPython(result: PythonAgentSuccess["result"]): AgentCha
       role: "assistant",
       variant: "accent",
       content: `Generated Python snippet:\n${result.code.trim()}`,
+      htmlPath: result.final_html_path,
+      htmlWebPath: result.final_html_web_path,
     });
   }
 
@@ -321,6 +335,8 @@ export async function runVlmAgent(prompt: string, imagePath?: string): Promise<A
       detail: pythonResult.logs ?? pythonResult.result.logs,
     },
     usedFallback: false,
+    finalHtmlPath: pythonResult.result.final_html_path,
+    finalHtmlWebPath: pythonResult.result.final_html_web_path,
   };
 }
 

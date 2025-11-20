@@ -78,6 +78,8 @@ export type StoredChatMessage = {
   attachments?: StoredChatAttachment[];
   renderAsCode?: boolean;
   codeLanguage?: string;
+  htmlPath?: string;
+  htmlWebPath?: string | null;
 };
 
 export type PromptHistoryPayload = {
@@ -226,6 +228,11 @@ function normalizeStoredChatMessage(
     codeLanguage:
       rawMessage.codeLanguage && typeof rawMessage.codeLanguage === "string"
         ? rawMessage.codeLanguage
+        : undefined,
+    htmlPath: typeof rawMessage.htmlPath === "string" ? rawMessage.htmlPath : undefined,
+    htmlWebPath:
+      typeof rawMessage.htmlWebPath === "string" || rawMessage.htmlWebPath === null
+        ? rawMessage.htmlWebPath ?? null
         : undefined,
   };
 }
