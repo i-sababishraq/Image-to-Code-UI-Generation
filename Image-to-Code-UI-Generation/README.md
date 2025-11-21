@@ -26,6 +26,9 @@ The project progressed through a set of sprints. The following ordered list refl
 - **Phase 5 — Integration & final iteration (integration by Tina):**
 	- `agent_azure_vlm_tools.py` — integration layer that combines components and represents the most recent, final iteration
 
+- **Phase 6 — Frontend integration (integration by Megan):**
+	- `run_agent_once.py` — integration layer that wraps the final integration into the format to connect with the frontend 
+
 - **Other files / repo assets:**
 	- `.env` — environment vars (not tracked in source control by default)
 	- `requirements.txt` — Python dependencies

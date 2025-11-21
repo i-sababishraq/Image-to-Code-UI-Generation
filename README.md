@@ -12,6 +12,8 @@ Image2Code is a React Router application that lets designers and engineers colla
 - **Dark-mode UI** – Opinionated visual design optimized for late-night build sessions.
 - **Firebase ready** – Client bootstraps Firebase Authentication, Firestore, and (optionally) Analytics for persistence and team features.
 
+# Frontend (React, by Megan)
+
 ## Tech Stack
 
 - [React Router](https://reactrouter.com/) 7 (app directory, data APIs, SSR-ready)
