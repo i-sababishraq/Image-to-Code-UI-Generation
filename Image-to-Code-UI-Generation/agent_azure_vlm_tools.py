@@ -77,7 +77,7 @@ class ModelManager:
             self.AZURE_ENDPOINT = os.getenv("ENDPOINT_URL")
             self.AZURE_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
             if not self.AZURE_API_KEY or not self.AZURE_ENDPOINT:
-                print("Warning: AZURE_OPENAI_API_KEY or ENDPOINT_URL not set.")
+                print(f"Warning: Missing Azure config. AZURE_OPENAI_API_KEY set? {bool(self.AZURE_API_KEY)}. ENDPOINT_URL set? {bool(self.AZURE_ENDPOINT)}")
                 self.azure_client = None
             else:
                 self.azure_client = AzureOpenAI(
@@ -109,7 +109,7 @@ class ModelManager:
 
     def get_azure_client(self) -> AzureOpenAI:
         if not hasattr(self, 'azure_client') or self.azure_client is None:
-            raise RuntimeError("Azure client not initialized. Set AZURE_OPENAI_API_KEY and ENDPOINT_URL.")
+            raise RuntimeError(f"Azure client not initialized. AZURE_OPENAI_API_KEY set? {bool(self.AZURE_API_KEY)}. ENDPOINT_URL set? {bool(self.AZURE_ENDPOINT)}")
         return self.azure_client
 
     def chat_complete_azure(self, deployment: Optional[str], messages: List[Dict[str, Any]],

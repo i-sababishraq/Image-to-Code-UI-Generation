@@ -214,6 +214,7 @@ def _emit_response(success: bool, payload: Dict[str, Any]) -> None:
 
 
 def main(argv: list[str]) -> None:
+    print(f"DEBUG: Available Env Vars: {list(os.environ.keys())}")
     try:
         request = _request_from_cli(argv) or _read_request_from_stdin()
         if not request:
