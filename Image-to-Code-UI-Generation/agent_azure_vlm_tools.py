@@ -41,7 +41,7 @@ load_dotenv()
 # ----------------------------------------------------------------------
 # ----------------------------------------------------------------------
 
-GPT_DEPLOYMENT_DEFAULT = os.getenv("GPT_DEPLOYMENT", "gpt-4.1-mini")
+GPT_DEPLOYMENT_DEFAULT = os.getenv("GPT_DEPLOYMENT", os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1-mini"))
 
 def _get_closest_aspect_ratio(width: int, height: int) -> str:
     """Calculates the closest supported aspect ratio for the Gemini API."""
@@ -74,7 +74,7 @@ class ModelManager:
             print("Initializing Azure/OpenAI clients (GPT-only mode)...")
 
             # Azure OpenAI client (for most GPT calls)
-            self.AZURE_ENDPOINT = os.getenv("ENDPOINT_URL")
+            self.AZURE_ENDPOINT = os.getenv("ENDPOINT_URL") or os.getenv("AZURE_OPENAI_ENDPOINT")
             self.AZURE_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
             if not self.AZURE_API_KEY or not self.AZURE_ENDPOINT:
                 print(f"Warning: Missing Azure config. AZURE_OPENAI_API_KEY set? {bool(self.AZURE_API_KEY)}. ENDPOINT_URL set? {bool(self.AZURE_ENDPOINT)}")
@@ -109,7 +109,7 @@ class ModelManager:
 
     def get_azure_client(self) -> AzureOpenAI:
         if not hasattr(self, 'azure_client') or self.azure_client is None:
-            raise RuntimeError(f"Azure client not initialized. AZURE_OPENAI_API_KEY set? {bool(self.AZURE_API_KEY)}. ENDPOINT_URL set? {bool(self.AZURE_ENDPOINT)}")
+            raise RuntimeError(f"Azure client not initialized. AZURE_OPENAI_API_KEY set? {bool(self.AZURE_API_KEY)}. ENDPOINT_URL (or AZURE_OPENAI_ENDPOINT) set? {bool(self.AZURE_ENDPOINT)}")
         return self.azure_client
 
     def chat_complete_azure(self, deployment: Optional[str], messages: List[Dict[str, Any]],

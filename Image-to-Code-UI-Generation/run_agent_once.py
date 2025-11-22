@@ -28,7 +28,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 
 DEFAULT_PROMPT = "Generate production-ready HTML/CSS for this wireframe."
-DEFAULT_DEPLOYMENT = os.getenv("GPT_DEPLOYMENT", os.getenv("DEPLOYMENT_NAME", "gpt-4.1-mini"))
+DEFAULT_DEPLOYMENT = os.getenv("GPT_DEPLOYMENT", os.getenv("DEPLOYMENT_NAME", os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4.1-mini")))
 DEFAULT_FIND_ASSETS = os.getenv("AGENT_FIND_ASSETS", "true").lower() in {"1", "true", "yes"}
 DEFAULT_REFINE_ITERS = int(os.getenv("AGENT_REFINE_MAX_ITERS", "3"))
 DEFAULT_REFINE_THRESHOLD = int(os.getenv("AGENT_REFINE_THRESHOLD", "8"))
