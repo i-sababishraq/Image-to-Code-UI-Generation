@@ -559,7 +559,7 @@ export function Welcome() {
   const [pexelsResult, setPexelsResult] = useState<PexelsImageResult | null>(null);
   const [isPexelsSearching, setIsPexelsSearching] = useState(false);
   const [isPexelsDownloading, setIsPexelsDownloading] = useState(false);
-  const [isPexelsDownloading, setIsPexelsDownloading] = useState(false);
+
   const [pexelsError, setPexelsError] = useState<string | null>(null);
   const [refineMaxIters, setRefineMaxIters] = useState(3);
   const displayName = user?.displayName ?? user?.email ?? "Anonymous";
@@ -2244,7 +2244,11 @@ function highlightHtmlSyntax(escaped: string) {
   return result;
 }
 
-    </svg >
+function FileGlyph() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 text-slate-300">
+      <path d="M5 2a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7.414a2 2 0 00-.586-1.414l-3.414-3.414A2 2 0 0011.586 2H5zm4 6V3h2v5h4v2h-5a1 1 0 01-1-1z" />
+    </svg>
   );
 }
 
