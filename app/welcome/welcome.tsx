@@ -503,6 +503,7 @@ const createMessageId = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2);
 
+// Navigation items configuration
 const navItems: NavItem[] = [
   { key: "chat", label: "Chat", description: "Live" },
   { key: "preview", label: "Preview", description: "Generated UI" },
