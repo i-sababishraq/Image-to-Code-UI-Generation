@@ -1,0 +1,11 @@
+aiohttp
+requests
+pillow
+numpy
+pandas
+openai
+google-genai
+playwright
+python-dotenv
+langgraph
+datasets
