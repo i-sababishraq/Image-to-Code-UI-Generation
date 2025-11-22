@@ -78,7 +78,7 @@ function collectStream(stream: Readable): Promise<string> {
   });
 }
 
-async function runPythonProcess(prompt: string, imagePath?: string): Promise<PythonAgentResponse> {
+async function runPythonProcess(prompt: string, imagePath?: string, refineMaxIters?: number): Promise<PythonAgentResponse> {
   const pythonExecutable = process.env.PYTHON_BINARY ?? process.env.PYTHON ?? "python";
 
   return await new Promise<PythonAgentResponse>((resolveResult) => {
@@ -159,6 +159,7 @@ async function runPythonProcess(prompt: string, imagePath?: string): Promise<Pyt
       JSON.stringify({
         prompt,
         image_path: imagePath ?? null,
+        refine_max_iters: refineMaxIters,
       }),
       "utf8",
       () => {
@@ -306,8 +307,8 @@ function fallbackMessages(prompt: string): AgentRunResult {
   };
 }
 
-export async function runVlmAgent(prompt: string, imagePath?: string): Promise<AgentRunResult> {
-  const pythonResult = await runPythonProcess(prompt, imagePath);
+export async function runVlmAgent(prompt: string, imagePath?: string, refineMaxIters?: number): Promise<AgentRunResult> {
+  const pythonResult = await runPythonProcess(prompt, imagePath, refineMaxIters);
 
   if (!pythonResult.success) {
     const errorMessage = pythonResult.error ?? "The VLM agent failed without providing a reason.";

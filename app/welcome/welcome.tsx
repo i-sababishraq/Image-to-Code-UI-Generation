@@ -22,7 +22,7 @@ import {
   type StoredChatMessage,
 } from "../services/userData";
 
-type TabKey = "chat" | "preview" | "history";
+type TabKey = "chat" | "preview" | "history" | "files";
 
 type NavItem = {
   key: TabKey;
@@ -327,12 +327,12 @@ const mapAgentPayloadToMessages = (
     );
     const previewAttachments: ChatAttachment[] | undefined = previewSource?.attachments
       ? previewSource.attachments.map((attachment) => ({
-          id: attachment.id,
-          name: attachment.name,
-          type: attachment.type,
-          previewUrl: attachment.previewUrl,
-          size: attachment.size,
-        }))
+        id: attachment.id,
+        name: attachment.name,
+        type: attachment.type,
+        previewUrl: attachment.previewUrl,
+        size: attachment.size,
+      }))
       : undefined;
 
     const codeMessage: Message = {
@@ -372,12 +372,12 @@ const mapAgentPayloadToMessages = (
     attachments:
       message.attachments && message.attachments.length > 0
         ? message.attachments.map((attachment) => ({
-            id: attachment.id ?? createMessageId(),
-            name: attachment.name,
-            type: attachment.type,
-            previewUrl: attachment.previewUrl,
-            size: attachment.size,
-          }))
+          id: attachment.id ?? createMessageId(),
+          name: attachment.name,
+          type: attachment.type,
+          previewUrl: attachment.previewUrl,
+          size: attachment.size,
+        }))
         : undefined,
   }));
 };
@@ -503,10 +503,10 @@ const createMessageId = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2);
 
-const navItems: NavItem[] = [
-  { key: "chat", label: "Chat", description: "Live" },
-  { key: "preview", label: "Preview", description: "Generated UI" },
-  { key: "history", label: "History", description: "Previous runs" },
+{ key: "chat", label: "Chat", description: "Live" },
+{ key: "preview", label: "Preview", description: "Generated UI" },
+{ key: "history", label: "History", description: "Previous runs" },
+{ key: "files", label: "Files", description: "Output assets" },
 ];
 
 const IMAGE2CODE_ONBOARDING_PROMPT = [
@@ -557,7 +557,9 @@ export function Welcome() {
   const [pexelsResult, setPexelsResult] = useState<PexelsImageResult | null>(null);
   const [isPexelsSearching, setIsPexelsSearching] = useState(false);
   const [isPexelsDownloading, setIsPexelsDownloading] = useState(false);
+  const [isPexelsDownloading, setIsPexelsDownloading] = useState(false);
   const [pexelsError, setPexelsError] = useState<string | null>(null);
+  const [refineMaxIters, setRefineMaxIters] = useState(3);
   const displayName = user?.displayName ?? user?.email ?? "Anonymous";
   const inspirationPreviews =
     pendingWireframes.length > 0 ? pendingWireframes : submittedWireframes;
@@ -934,6 +936,7 @@ export function Welcome() {
 
       const requestPayload = new FormData();
       requestPayload.append("prompt", textContent);
+      requestPayload.append("refine_max_iters", refineMaxIters.toString());
       filesToSend.forEach((file) => {
         requestPayload.append("images", file);
       });
@@ -1245,6 +1248,8 @@ export function Welcome() {
             deletingEntryId={pendingDeleteId}
           />
         );
+      case "files":
+        return <FilesPanel />;
       case "chat":
       default:
         return (
@@ -1271,6 +1276,8 @@ export function Welcome() {
             pexelsError={pexelsError}
             onPexelsDownload={handlePexelsDownload}
             isPexelsDownloading={isPexelsDownloading}
+            refineMaxIters={refineMaxIters}
+            onRefineMaxItersChange={setRefineMaxIters}
           />
         );
     }
@@ -1311,11 +1318,10 @@ export function Welcome() {
                     type="button"
                     onClick={() => setActiveTab(item.key)}
                     aria-pressed={isActive}
-                    className={`rounded-2xl border px-3 py-2 text-left text-sm font-medium transition-all duration-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2F6BFF] ${
-                      isActive
+                    className={`rounded-2xl border px-3 py-2 text-left text-sm font-medium transition-all duration-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2F6BFF] ${isActive
                         ? "border-[#2F6BFF] bg-slate-900/70 text-[#D6E2FF]"
                         : "border-slate-800/70 bg-slate-900/50 text-slate-500 hover:border-[#2F6BFF]/40 hover:text-slate-200"
-                    }`}
+                      }`}
                   >
                     <span className="block text-sm font-semibold">{item.label}</span>
                     <span className="text-xs font-normal text-slate-500">
@@ -1340,11 +1346,10 @@ export function Welcome() {
 
         {status && (
           <div
-            className={`rounded-2xl border px-4 py-3 text-sm ${
-              status.kind === "success"
+            className={`rounded-2xl border px-4 py-3 text-sm ${status.kind === "success"
                 ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
                 : "border-rose-500/40 bg-rose-500/10 text-rose-100"
-            }`}
+              }`}
           >
             <p className="font-medium">{status.text}</p>
             {status.detail && <p className="mt-1 text-xs opacity-80">{status.detail}</p>}
@@ -1403,6 +1408,8 @@ type ChatPanelProps = {
   pexelsError: string | null;
   onPexelsDownload: () => void;
   isPexelsDownloading: boolean;
+  refineMaxIters: number;
+  onRefineMaxItersChange: (value: number) => void;
 };
 
 function ChatPanel({
@@ -1428,6 +1435,8 @@ function ChatPanel({
   pexelsError,
   onPexelsDownload,
   isPexelsDownloading,
+  refineMaxIters,
+  onRefineMaxItersChange,
 }: ChatPanelProps) {
   return (
     <section className="grid gap-6 lg:grid-cols-[0.65fr_minmax(0,_1fr)]">
@@ -1508,6 +1517,22 @@ function ChatPanel({
                 Using wireframes from your previous run.
               </p>
             )}
+            {selectedFiles.length === 0 && hasStoredWireframes && (
+              <p className="text-xs text-slate-500">
+                Using wireframes from your previous run.
+              </p>
+            )}
+            <label className="flex items-center gap-2 pt-2">
+              <span className="text-xs font-medium text-slate-400">Refinement Iterations:</span>
+              <input
+                type="number"
+                min={1}
+                max={10}
+                value={refineMaxIters}
+                onChange={(e) => onRefineMaxItersChange(parseInt(e.target.value, 10) || 3)}
+                className="w-16 rounded-lg border border-slate-800 bg-slate-950 px-2 py-1 text-xs text-slate-200 focus:border-[#2F6BFF]/60 focus:outline-none"
+              />
+            </label>
           </div>
 
           <input
@@ -2026,8 +2051,8 @@ function MessageBubble({ message }: MessageBubbleProps) {
   const avatarTone = isUser
     ? "bg-slate-800 text-[#7DA6FF]"
     : message.variant === "accent"
-    ? "bg-[#2F6BFF] text-white"
-    : "bg-slate-800 text-slate-200";
+      ? "bg-[#2F6BFF] text-white"
+      : "bg-slate-800 text-slate-200";
 
   const containerDirection = isUser ? "flex-row-reverse" : "flex-row";
   const alignment = isUser ? "items-end" : "items-start";
@@ -2217,10 +2242,143 @@ function highlightHtmlSyntax(escaped: string) {
   return result;
 }
 
-function FileGlyph() {
+    </svg >
+  );
+}
+
+type FileNode = {
+  name: string;
+  isDirectory: boolean;
+  path: string;
+  size: number;
+};
+
+function FilesPanel() {
+  const [files, setFiles] = useState<FileNode[]>([]);
+  const [currentPath, setCurrentPath] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchFiles = useCallback(async (path: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/files?path=${encodeURIComponent(path)}`);
+      if (!response.ok) throw new Error("Failed to fetch files");
+      const data = await response.json();
+      setFiles(data.files);
+      setCurrentPath(path);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchFiles("");
+  }, [fetchFiles]);
+
+  const handleNavigate = (path: string) => {
+    void fetchFiles(path);
+  };
+
+  const handleDownload = (path: string) => {
+    window.open(`/api/files?path=${encodeURIComponent(path)}`, "_blank");
+  };
+
+  const handleUpLevel = () => {
+    if (!currentPath) return;
+    const parts = currentPath.split("/");
+    parts.pop();
+    void fetchFiles(parts.join("/"));
+  };
+
   return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4 text-slate-300">
-      <path d="M5 2a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7.414a2 2 0 00-.586-1.414l-3.414-3.414A2 2 0 0011.586 2H5zm4 6V3h2v5h4v2h-5a1 1 0 01-1-1z" />
-    </svg>
+    <section className="flex flex-col gap-6 rounded-3xl border border-slate-800/70 bg-slate-900/80 px-6 py-5 shadow-[0_24px_70px_-50px_rgba(15,23,42,1)]">
+      <header>
+        <h2 className="text-sm font-semibold text-slate-300">Output Files</h2>
+        <p className="text-xs text-slate-500">Browse generated assets and logs.</p>
+      </header>
+
+      <div className="flex items-center gap-2 text-sm text-slate-400">
+        <button
+          onClick={() => void fetchFiles("")}
+          className="hover:text-slate-200"
+          disabled={loading}
+        >
+          root
+        </button>
+        {currentPath.split("/").filter(Boolean).map((part, index, arr) => {
+          const path = arr.slice(0, index + 1).join("/");
+          return (
+            <div key={path} className="flex items-center gap-2">
+              <span>/</span>
+              <button
+                onClick={() => void fetchFiles(path)}
+                className="hover:text-slate-200"
+                disabled={loading}
+              >
+                {part}
+              </button>
+            </div>
+          );
+        })}
+      </div>
+
+      {loading ? (
+        <div className="text-sm text-slate-500">Loading...</div>
+      ) : error ? (
+        <div className="text-sm text-rose-400">{error}</div>
+      ) : (
+        <ul className="space-y-2">
+          {currentPath && (
+            <li>
+              <button
+                onClick={handleUpLevel}
+                className="flex items-center gap-2 text-sm text-slate-400 hover:text-slate-200"
+              >
+                <span>..</span>
+              </button>
+            </li>
+          )}
+          {files.map((file) => (
+            <li key={file.path} className="flex items-center justify-between rounded-lg border border-slate-800/50 bg-slate-950/30 px-3 py-2 transition hover:bg-slate-900">
+              <div className="flex items-center gap-3">
+                <span className="text-slate-500">
+                  {file.isDirectory ? (
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5 text-amber-500/70">
+                      <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+                    </svg>
+                  ) : (
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5 text-slate-400">
+                      <path fillRule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clipRule="evenodd" />
+                    </svg>
+                  )}
+                </span>
+                {file.isDirectory ? (
+                  <button
+                    onClick={() => handleNavigate(file.path)}
+                    className="text-sm font-medium text-slate-200 hover:underline"
+                  >
+                    {file.name}
+                  </button>
+                ) : (
+                  <span className="text-sm text-slate-300">{file.name}</span>
+                )}
+              </div>
+              {!file.isDirectory && (
+                <button
+                  onClick={() => handleDownload(file.path)}
+                  className="rounded px-2 py-1 text-xs font-medium text-[#6FA3FF] hover:bg-[#2F6BFF]/10"
+                >
+                  Download
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }

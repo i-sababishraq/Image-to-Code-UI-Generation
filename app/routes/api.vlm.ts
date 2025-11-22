@@ -39,6 +39,8 @@ export async function action({ request }: ActionArgs) {
   const promptValue = formData.get("prompt");
   const prompt = typeof promptValue === "string" ? promptValue.trim() : "";
   const skipImageRequirement = formData.get("skipImageRequirement") === "true";
+  const refineMaxItersValue = formData.get("refine_max_iters");
+  const refineMaxIters = typeof refineMaxItersValue === "string" ? parseInt(refineMaxItersValue, 10) : undefined;
 
   if (!prompt) {
     return Response.json(
@@ -119,7 +121,7 @@ export async function action({ request }: ActionArgs) {
     }
 
     const primaryImage = savedPaths[0];
-    result = await runVlmAgent(prompt, primaryImage);
+    result = await runVlmAgent(prompt, primaryImage, refineMaxIters);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown server error.";
     return Response.json(
