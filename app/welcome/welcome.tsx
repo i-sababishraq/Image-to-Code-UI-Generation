@@ -526,7 +526,7 @@ const FALLBACK_INSTRUCTIONS = [
   "• Use the Preview and History tabs to inspect generated code or revisit prior explorations.",
 ].join("\n");
 
-const AGENT_REQUEST_TIMEOUT_MS = 3_600_000; // 6 minutes
+const AGENT_REQUEST_TIMEOUT_MS = 3_600_000; // 60 minutes
 
 export function Welcome() {
   const { user, loading, signOut } = useAuth();

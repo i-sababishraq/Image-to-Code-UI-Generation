@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Readable } from "node:stream";
 
-const PYTHON_TIMEOUT_MS = 3_000_000; // 5 minutes
+const PYTHON_TIMEOUT_MS = 3_000_000; // 50 minutes
 const PYTHON_SCRIPT = "run_agent_once.py";
 
 type AgentAttachment = {
