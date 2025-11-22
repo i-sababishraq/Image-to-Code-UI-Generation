@@ -1112,7 +1112,7 @@ def helper_run_azure_vlm_pipeline(
     text_deployment: str,
     refine_max_iters: int,
     refine_threshold: int,
-    find_assets: bool = False
+    find_assets: bool = True
 ) -> str:
     print(f"--- BRAIN: Invoking Azure VLM Pipeline for {image_path} ---")
     try:
@@ -1131,7 +1131,7 @@ def helper_run_azure_vlm_pipeline(
             # Hardcoded values remain for now
             reldesc_tokens=700,
             brief_tokens=1100,
-            code_tokens=8192,
+            code_tokens=20000,
             judge_tokens=900,
             temp=0.12,
             shot_width=1536,
