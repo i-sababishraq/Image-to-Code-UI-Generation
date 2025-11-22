@@ -503,10 +503,11 @@ const createMessageId = () =>
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2);
 
-{ key: "chat", label: "Chat", description: "Live" },
-{ key: "preview", label: "Preview", description: "Generated UI" },
-{ key: "history", label: "History", description: "Previous runs" },
-{ key: "files", label: "Files", description: "Output assets" },
+const navItems: NavItem[] = [
+  { key: "chat", label: "Chat", description: "Live" },
+  { key: "preview", label: "Preview", description: "Generated UI" },
+  { key: "history", label: "History", description: "Previous runs" },
+  { key: "files", label: "Files", description: "Output assets" },
 ];
 
 const IMAGE2CODE_ONBOARDING_PROMPT = [
@@ -1319,8 +1320,8 @@ export function Welcome() {
                     onClick={() => setActiveTab(item.key)}
                     aria-pressed={isActive}
                     className={`rounded-2xl border px-3 py-2 text-left text-sm font-medium transition-all duration-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#2F6BFF] ${isActive
-                        ? "border-[#2F6BFF] bg-slate-900/70 text-[#D6E2FF]"
-                        : "border-slate-800/70 bg-slate-900/50 text-slate-500 hover:border-[#2F6BFF]/40 hover:text-slate-200"
+                      ? "border-[#2F6BFF] bg-slate-900/70 text-[#D6E2FF]"
+                      : "border-slate-800/70 bg-slate-900/50 text-slate-500 hover:border-[#2F6BFF]/40 hover:text-slate-200"
                       }`}
                   >
                     <span className="block text-sm font-semibold">{item.label}</span>
@@ -1347,8 +1348,8 @@ export function Welcome() {
         {status && (
           <div
             className={`rounded-2xl border px-4 py-3 text-sm ${status.kind === "success"
-                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-                : "border-rose-500/40 bg-rose-500/10 text-rose-100"
+              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
+              : "border-rose-500/40 bg-rose-500/10 text-rose-100"
               }`}
           >
             <p className="font-medium">{status.text}</p>
