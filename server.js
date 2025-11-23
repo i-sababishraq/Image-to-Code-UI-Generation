@@ -23,7 +23,7 @@ app.use(morgan("tiny"));
 const build = await import("./build/server/index.js");
 
 app.all(
-    "(.*)",
+    "*splat",
     createRequestHandler({
         build,
         mode: process.env.NODE_ENV,
@@ -33,6 +33,7 @@ app.all(
 const port = process.env.PORT || 3000;
 const server = app.listen(port, () => {
     console.log(`Express server listening on port ${port}`);
+    console.log("Starting server v2 (Regex Route)");
 });
 
 // Set server timeout to 60 minutes to match the client-side timeout
