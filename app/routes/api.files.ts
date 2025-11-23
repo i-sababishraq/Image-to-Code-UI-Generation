@@ -53,6 +53,10 @@ export async function loader({ request }: { request: Request }) {
             });
         }
     } catch (error) {
+        // If the directory doesn't exist yet (e.g. before first run), return empty list for root
+        if ((error as { code?: string }).code === "ENOENT" && relativePath === "") {
+            return Response.json({ files: [] });
+        }
         return new Response("Not Found", { status: 404 });
     }
 }
