@@ -8,4 +8,5 @@ export default [
   route("welcome", "routes/welcome.tsx"),
   route("api/vlm", "routes/api.vlm.ts"),
   route("api/pexels", "routes/api.pexels.ts"),
+  route("api/files", "routes/api.files.ts"),
 ];
