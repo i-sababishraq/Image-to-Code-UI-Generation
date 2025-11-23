@@ -23,7 +23,7 @@ app.use(morgan("tiny"));
 const build = await import("./build/server/index.js");
 
 app.all(
-    "*",
+    "(.*)",
     createRequestHandler({
         build,
         mode: process.env.NODE_ENV,
