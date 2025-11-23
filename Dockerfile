@@ -1,12 +1,12 @@
 FROM node:20-slim AS development-dependencies-env
 COPY . /app
 WORKDIR /app
-RUN npm ci
+RUN npm install
 
 FROM node:20-slim AS production-dependencies-env
 COPY ./package.json package-lock.json /app/
 WORKDIR /app
-RUN npm ci --omit=dev
+RUN npm install --omit=dev
 
 FROM node:20-slim AS build-env
 COPY . /app/

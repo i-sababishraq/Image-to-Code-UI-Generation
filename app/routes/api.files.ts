@@ -8,6 +8,9 @@ export async function loader({ request }: { request: Request }) {
 
     const outputsDir = resolve(pythonWorkingDir, "Outputs");
     const targetPath = resolve(outputsDir, relativePath);
+    console.log(`[Files API] Request for: ${relativePath}`);
+    console.log(`[Files API] Resolved outputsDir: ${outputsDir}`);
+    console.log(`[Files API] Resolved targetPath: ${targetPath}`);
 
     // Security check: ensure targetPath is within outputsDir
     if (!targetPath.startsWith(outputsDir)) {
